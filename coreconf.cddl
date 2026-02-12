@@ -1,0 +1,32 @@
+; CDDL Schema para CORECONF usando zcbor
+; Define las estructuras dinámicas de CoreconfValueT para serialización CBOR
+
+coreconf-value = coreconf-map
+               / coreconf-array
+               / coreconf-primitive
+
+; Mapa CORECONF: key = SID delta (uint), value = cualquier valor CORECONF
+coreconf-map = {
+    * uint => coreconf-value
+}
+
+; Array CORECONF: secuencia de valores heterogéneos
+coreconf-array = [ * coreconf-value ]
+
+; Primitivos CORECONF: soporta todos los tipos básicos
+coreconf-primitive = uint      ; CORECONF_UINT_*
+                   / nint      ; CORECONF_INT_*
+                   / tstr      ; CORECONF_STRING
+                   / float16   ; CORECONF_REAL (16 bits)
+                   / float32   ; CORECONF_REAL (32 bits)
+                   / float64   ; CORECONF_REAL (64 bits)
+                   / bool      ; CORECONF_TRUE / CORECONF_FALSE
+
+; Key Mapping: mapea SID -> lista de SID-keys
+key-mapping = {
+    * uint => [ + uint ]
+}
+
+; Modelo completo CORECONF
+coreconf-model = coreconf-map
+

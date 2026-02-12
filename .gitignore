@@ -1,0 +1,60 @@
+# Archivos compilados
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# Directorios de build
+obj/
+build/
+build_*/
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+
+# Ejecutables de tests
+examples/test_zcbor_migration
+examples/test_fetch_simple
+examples/test_exhaustive
+
+# Ejecutables IoT
+iot_containers/iot_apps/iot_server
+iot_containers/iot_apps/iot_client
+iot_containers/iot_apps/iot_test_local
+
+# Logs
+*.log
+server.log
+
+# Temporales del editor
+*~
+*.swp
+*.swo
+.*.sw?
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-*
+
+# Archivos de respaldo
+*_OLD.*
+*.bak
+*.backup
+
+# Archivos CBOR binarios (excepto ejemplos)
+*.cbor
+!ejemplos/*.cbor
+!mascotas_ejemplo.json.cbor
+
+# Documentación generada
+docs/_build/

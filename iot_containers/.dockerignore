@@ -1,0 +1,13 @@
+# Ignorar archivos innecesarios en el build
+*.o
+*.a
+*.so
+.git
+.gitignore
+README.md
+logs/
+examples/test_*
+iot_apps/iot_test_local
+iot_apps/iot_server
+iot_apps/iot_client
+*.md

@@ -1,0 +1,99 @@
+version: '3.8'
+
+services:
+  # Gateway/Coordinador IoT
+  iot_gateway:
+    build: .
+    container_name: iot_gateway
+    hostname: gateway
+    environment:
+      - DEVICE_ID=gateway-001
+      - DEVICE_TYPE=gateway
+    ports:
+      - "5683:5683"
+      - "8080:8080"
+    networks:
+      iot_network:
+        ipv4_address: 172.20.0.10
+    command: ./iot_apps/iot_server
+    volumes:
+      - ./logs:/iot_device/logs
+
+  # Sensor de temperatura
+  iot_sensor_temp:
+    build: .
+    container_name: iot_sensor_temp
+    hostname: sensor-temp
+    environment:
+      - DEVICE_ID=sensor-temp-001
+      - DEVICE_TYPE=temperature_sensor
+      - GATEWAY_HOST=172.20.0.10
+      - GATEWAY_PORT=5683
+    networks:
+      iot_network:
+        ipv4_address: 172.20.0.11
+    command: ./iot_apps/iot_client temperature
+    depends_on:
+      - iot_gateway
+
+  # Sensor de humedad
+  iot_sensor_humidity:
+    build: .
+    container_name: iot_sensor_humidity
+    hostname: sensor-humidity
+    environment:
+      - DEVICE_ID=sensor-humidity-001
+      - DEVICE_TYPE=humidity_sensor
+      - GATEWAY_HOST=172.20.0.10
+      - GATEWAY_PORT=5683
+    networks:
+      iot_network:
+        ipv4_address: 172.20.0.12
+    command: ./iot_apps/iot_client humidity
+    depends_on:
+      - iot_gateway
+
+  # Actuador (LED/Relay)
+  iot_actuator:
+    build: .
+    container_name: iot_actuator
+    hostname: actuator
+    environment:
+      - DEVICE_ID=actuator-001
+      - DEVICE_TYPE=relay
+      - GATEWAY_HOST=172.20.0.10
+      - GATEWAY_PORT=5683
+    networks:
+      iot_network:
+        ipv4_address: 172.20.0.13
+    command: ./iot_apps/iot_client actuator
+    depends_on:
+      - iot_gateway
+
+  # Edge device (procesamiento local)
+  iot_edge:
+    build: .
+    container_name: iot_edge
+    hostname: edge-device
+    environment:
+      - DEVICE_ID=edge-001
+      - DEVICE_TYPE=edge_processor
+      - GATEWAY_HOST=172.20.0.10
+      - GATEWAY_PORT=5683
+    networks:
+      iot_network:
+        ipv4_address: 172.20.0.14
+    command: ./iot_apps/iot_client edge
+    depends_on:
+      - iot_gateway
+
+networks:
+  iot_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+
+volumes:
+  logs:
