@@ -804,9 +804,9 @@ Este proyecto se distribuye bajo licencia académica como parte de un TFG. Consu
 
 ## 👤 Autor
 
-**Pablo**  
-📧 Email: [tu-email@universidad.es]  
-🎓 Universidad: [Nombre de la Universidad]  
+**Pablo Hernández Galindo**  
+📧 Email: [p.hernandezgalindo@um.es]  
+🎓 Universidad: [Universidad de Murcia]  
 📅 Año: 2026
 
 ---
