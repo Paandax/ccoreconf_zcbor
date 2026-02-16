@@ -154,7 +154,7 @@ size_t len = states[0].payload - buffer;
 ### Clonar el Repositorio
 
 ```bash
-git clone https://github.com/tu-usuario/ccoreconf_zcbor.git
+git clone https://github.com/Paandax/ccoreconf_zcbor.git
 cd ccoreconf_zcbor
 ```
 
@@ -775,32 +775,8 @@ TOTAL                        50        ✅ 100%
 
 ## 🤝 Contribuciones
 
-Este proyecto es parte de un **Trabajo de Fin de Grado (TFG)**. Las contribuciones son bienvenidas para mejoras y extensiones:
+Este proyecto es parte de un **Trabajo de Fin de Grado (TFG)**. 
 
-1. **Fork** el repositorio
-2. Crea una rama de feature: `git checkout -b feature/nueva-funcionalidad`
-3. Realiza tus cambios y añade tests
-4. Commit: `git commit -am 'Añadir nueva funcionalidad'`
-5. Push: `git push origin feature/nueva-funcionalidad`
-6. Abre un **Pull Request**
-
-### Áreas de Mejora Sugeridas
-
-- [ ] Implementar operación EXAMINE completa
-- [ ] Añadir soporte para CBOR tags
-- [ ] Integración con CoAP (RFC 7252)
-- [ ] Seguridad: DTLS para comunicaciones cifradas
-- [ ] Persistencia: Almacenamiento en SQLite/LevelDB
-- [ ] Dashboard web para monitoreo en tiempo real
-- [ ] Tests de rendimiento con benchmarks
-
----
-
-## 📄 Licencia
-
-Este proyecto se distribuye bajo licencia académica como parte de un TFG. Consulta con el autor para usos comerciales.
-
----
 
 ## 👤 Autor
 
@@ -811,23 +787,14 @@ Este proyecto se distribuye bajo licencia académica como parte de un TFG. Consu
 
 ---
 
-## 🙏 Agradecimientos
+## 🙏 Referencias
 
-- **Nordic Semiconductor** por la excelente librería zcbor
+- **Nordic Semiconductor** por la librería zcbor
 - **IETF CORE Working Group** por el desarrollo del estándar CORECONF
 - **Comunidad CBOR** por la especificación RFC 8949
-- **Profesor/Tutor** [Nombre] por la guía y supervisión
+
 
 ---
 
-<div align="center">
 
-**⭐ Si este proyecto te ha sido útil, considera darle una estrella en GitHub ⭐**
 
-[![GitHub stars](https://img.shields.io/github/stars/tu-usuario/ccoreconf_zcbor.svg?style=social&label=Star)](https://github.com/tu-usuario/ccoreconf_zcbor)
-
----
-
-*Desarrollado con ❤️ para dispositivos IoT embebidos*
-
-</div>
