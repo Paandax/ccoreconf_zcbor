@@ -8,31 +8,36 @@
 
 #include "../include/sid.h"
 
-/**
- * Internal methods, not exposed to the user
- */
+// Funciones internas para parsear arrays y maps
 bool _parse_array(zcbor_state_t *state, CoreconfValueT *coreconfValue, unsigned indent);
 bool _parse_map(zcbor_state_t *state, CoreconfValueT *coreconfValue, unsigned indent);
 
+// Serializa un objeto CORECONF con su clave y valor
 void serializeCoreconfObject(CoreconfObjectT *object, void *state_) {
     zcbor_state_t *state = (zcbor_state_t *)state_;
+    // Primero pongo la clave (SID)
     zcbor_uint64_put(state, object->key);
+    // Luego serializo el valor
     coreconfToCBOR(object->value, state);
 }
 
-// Serialization and Deserialization into CBOR
+// Función principal para convertir valores CORECONF a CBOR usando zcbor
 bool coreconfToCBOR(CoreconfValueT *coreconfValue, zcbor_state_t *state) {
     bool res = true;
     
+    // Switch según el tipo de dato CORECONF que tengo que serializar
     switch (coreconfValue->type) {
         case CORECONF_HASHMAP: {
+            // Para hashmaps primero inicio el mapa con el tamaño
             res = zcbor_map_start_encode(state, coreconfValue->data.map_value->size);
             if (!res) return false;
+            // Itero por todos los elementos y los serializo
             iterateCoreconfHashMap(coreconfValue->data.map_value, (void *)state, serializeCoreconfObject);
             res = zcbor_map_end_encode(state, coreconfValue->data.map_value->size);
             break;
         }
         case CORECONF_ARRAY: {
+            // Arrays: inicio la lista y voy serializando cada elemento
             size_t arrayLength = coreconfValue->data.array_value->size;
             res = zcbor_list_start_encode(state, arrayLength);
             if (!res) return false;
@@ -72,6 +77,7 @@ bool coreconfToCBOR(CoreconfValueT *coreconfValue, zcbor_state_t *state) {
             res = zcbor_uint64_put(state, coreconfValue->data.u64);
             break;
         case CORECONF_STRING: {
+            // Para strings necesito crear una estructura zcbor_string
             struct zcbor_string zstr = {
                 .value = (const uint8_t *)coreconfValue->data.string_value,
                 .len = strlen(coreconfValue->data.string_value)
@@ -86,43 +92,45 @@ bool coreconfToCBOR(CoreconfValueT *coreconfValue, zcbor_state_t *state) {
             res = zcbor_bool_put(state, false);
             break;
         default:
-            // Something wrong happened
+            // Si llego aquí es que hay algún tipo no soportado
             return false;
     }
 
     return res;
 }
 
-// Deserialization from CBOR to Coreconf
+// Función para deserializar desde CBOR a estructuras CORECONF
 CoreconfValueT *cborToCoreconfValue(zcbor_state_t *state, unsigned indent) {
     CoreconfValueT *coreconfValue = NULL;
     
+    // Protección contra recursión infinita
     if (indent > CORECONF_MAX_DEPTH) {
         return NULL;
     }
     
-    // Peek at the major type by reading the current byte
+    // Leo el tipo principal del CBOR mirando el primer byte
     if (state->payload >= state->payload_end) {
         return NULL;
     }
     zcbor_major_type_t major_type = ZCBOR_MAJOR_TYPE(*state->payload);
     
+    // Dependiendo del tipo CBOR creo la estructura correspondiente
     switch (major_type) {
-        case ZCBOR_MAJOR_TYPE_PINT: {  // Positive integer (uint)
+        case ZCBOR_MAJOR_TYPE_PINT: {  // Entero positivo (uint)
             uint64_t unsignedInteger = 0;
             if (zcbor_uint64_decode(state, &unsignedInteger)) {
                 coreconfValue = createCoreconfUint64(unsignedInteger);
             }
             break;
         }
-        case ZCBOR_MAJOR_TYPE_NINT: {  // Negative integer
+        case ZCBOR_MAJOR_TYPE_NINT: {  // Entero negativo
             int64_t nint = 0;
             if (zcbor_int64_decode(state, &nint)) {
                 coreconfValue = createCoreconfInt64(nint);
             }
             break;
         }
-        case ZCBOR_MAJOR_TYPE_BSTR: {  // Byte string
+        case ZCBOR_MAJOR_TYPE_BSTR: {  // Cadena de bytes
             struct zcbor_string zstr;
             if (zcbor_bstr_decode(state, &zstr)) {
                 char *buf = malloc(zstr.len + 1);
@@ -133,7 +141,7 @@ CoreconfValueT *cborToCoreconfValue(zcbor_state_t *state, unsigned indent) {
             }
             break;
         }
-        case ZCBOR_MAJOR_TYPE_TSTR: {  // Text string
+        case ZCBOR_MAJOR_TYPE_TSTR: {  // Cadena de texto
             struct zcbor_string zstr;
             if (zcbor_tstr_decode(state, &zstr)) {
                 char formattedString[zstr.len + 1];
@@ -142,23 +150,23 @@ CoreconfValueT *cborToCoreconfValue(zcbor_state_t *state, unsigned indent) {
             }
             break;
         }
-        case ZCBOR_MAJOR_TYPE_LIST: {  // Array
+        case ZCBOR_MAJOR_TYPE_LIST: {  // Lista (array)
             coreconfValue = createCoreconfArray();
             _parse_array(state, coreconfValue, indent);
             break;
         }
-        case ZCBOR_MAJOR_TYPE_MAP: {  // Map
+        case ZCBOR_MAJOR_TYPE_MAP: {  // Mapa (diccionario)
             coreconfValue = createCoreconfHashmap();
             _parse_map(state, coreconfValue, indent);
             break;
         }
-        case ZCBOR_MAJOR_TYPE_SIMPLE: {  // Float, bool, null, etc.
-            // Try to decode as float64
+        case ZCBOR_MAJOR_TYPE_SIMPLE: {  // Tipos simples: float, bool, null...
+            // Primero intento decodificar como float64
             double doubleValue = 0;
             if (zcbor_float64_decode(state, &doubleValue)) {
                 coreconfValue = createCoreconfReal(doubleValue);
             } else {
-                // Try bool
+                // Si no es float, pruebo con booleano
                 bool boolValue;
                 if (zcbor_bool_decode(state, &boolValue)) {
                     coreconfValue = createCoreconfBoolean(boolValue);
@@ -172,13 +180,14 @@ CoreconfValueT *cborToCoreconfValue(zcbor_state_t *state, unsigned indent) {
     return coreconfValue;
 }
 
+// Función auxiliar para parsear arrays CBOR
 bool _parse_array(zcbor_state_t *state, CoreconfValueT *coreconfValue, unsigned indent) {
     if (!zcbor_list_start_decode(state)) {
-        printf("Error entering array\n");
+        printf("Error entrando en el array\n");
         return false;
     }
     
-    // Decode elements until we reach the end
+    // Voy decodificando elementos hasta llegar al final
     while (!zcbor_array_at_end(state)) {
         CoreconfValueT *arrayValue = cborToCoreconfValue(state, indent + 1);
         if (arrayValue) {
@@ -192,21 +201,22 @@ bool _parse_array(zcbor_state_t *state, CoreconfValueT *coreconfValue, unsigned 
     return true;
 }
 
+// Función auxiliar para parsear mapas CBOR
 bool _parse_map(zcbor_state_t *state, CoreconfValueT *coreconfValue, unsigned indent) {
     int loopCount = 0;
     
     if (!zcbor_map_start_decode(state)) {
-        printf("Error entering map\n");
+        printf("Error entrando en el map\n");
         return false;
     }
 
-    // Iterate over the map
+    // Itero sobre el mapa extrayendo clave-valor
     while (!zcbor_array_at_end(state)) {
-        if (loopCount > CORECONF_MAX_LOOP) return false;
+        if (loopCount > CORECONF_MAX_LOOP) return false;  // Protección anti-bucle infinito
 
         uint64_t coreconfKey = 0;
         if (!zcbor_uint64_decode(state, &coreconfKey)) {
-            printf("Error parsing map key\n");
+            printf("Error parseando la clave del map\n");
             return false;
         }
         
@@ -223,21 +233,22 @@ bool _parse_map(zcbor_state_t *state, CoreconfValueT *coreconfValue, unsigned in
     return true;
 }
 
+// Serializa el hashmap de mapeos de claves a CBOR
 bool keyMappingHashMapToCBOR(struct hashmap *keyMappingHashMap, zcbor_state_t *state) {
-    // Iterate through keyMappingHashMap
     size_t iter = 0;
     void *item;
 
-    // Start map encoding in CBOR
+    // Inicio el mapa CBOR con el tamaño del hashmap
     size_t map_size = hashmap_count(keyMappingHashMap);
     if (!zcbor_map_start_encode(state, map_size)) return false;
 
+    // Recorro todos los elementos del hashmap
     while (hashmap_iter(keyMappingHashMap, &iter, &item)) {
         const KeyMappingT *keyMapping = item;
-        // Add key
+        // Añado la clave
         if (!zcbor_uint64_put(state, keyMapping->key)) return false;
         
-        // Add array of SID keys
+        // Añado el array de SIDs asociados
         size_t array_size = keyMapping->dynamicLongList->size;
         if (!zcbor_list_start_encode(state, array_size)) return false;
         
@@ -253,8 +264,9 @@ bool keyMappingHashMapToCBOR(struct hashmap *keyMappingHashMap, zcbor_state_t *s
     return true;
 }
 
-// Deserialize a CBOR buffer to a KeyMappingHashMap
+// Deserializa un buffer CBOR y crea un hashmap de mapeos de claves
 struct hashmap *cborToKeyMappingHashMap(zcbor_state_t *state) {
+    // Creo el hashmap vacío
     struct hashmap *keyMappingHashMap =
         hashmap_new(sizeof(KeyMappingT), 0, 0, 0, keyMappingHash, keyMappingCompare, NULL, NULL);
     
@@ -263,12 +275,12 @@ struct hashmap *cborToKeyMappingHashMap(zcbor_state_t *state) {
     int loopCounter = 0;
 
     while (!zcbor_array_at_end(state)) {
-        // Safety mechanism to avoid infinite loops
+        // Protección para evitar bucles infinitos
         if (loopCounter > CORECONF_MAX_LOOP) return NULL;
 
         uint64_t key = 0;
         if (!zcbor_uint64_decode(state, &key)) {
-            printf("Error parsing map key\n");
+            printf("Error parseando clave del mapa\n");
             return NULL;
         }
         
@@ -285,17 +297,17 @@ struct hashmap *cborToKeyMappingHashMap(zcbor_state_t *state) {
 
             uint64_t sidKey = 0;
             if (!zcbor_uint64_decode(state, &sidKey)) {
-                printf("Error parsing array value\n");
+                printf("Error parseando valor del array\n");
                 return NULL;
             }
-            // Add to the dynamicLongList
+            // Lo añado a la lista dinámica
             addLong(keyMapping->dynamicLongList, sidKey);
             loopCounter++;
         }
         
         if (!zcbor_list_end_decode(state)) return NULL;
 
-        // Insert into the hashmap
+        // Inserto el keyMapping en el hashmap
         hashmap_set(keyMappingHashMap, keyMapping);
         loopCounter++;
     }
