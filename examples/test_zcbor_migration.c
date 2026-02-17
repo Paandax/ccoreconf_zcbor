@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <inttypes.h>
 
 #include "../include/coreconfTypes.h"
 #include "../include/serialization.h"
@@ -88,7 +89,7 @@ void test_basic_decoding(void) {
     if (val1->type == CORECONF_UINT_32) {
         printf("  Key 1 → %u (correcto)\n", val1->data.u32);
     } else {
-        printf("  Key 1 → %lu (correcto)\n", val1->data.u64);
+        printf("  Key 1 → %" PRIu64 " (correcto)\n", val1->data.u64);
     }
     
     CoreconfValueT *val2 = getCoreconfHashMap(decoded->data.map_value, 2);

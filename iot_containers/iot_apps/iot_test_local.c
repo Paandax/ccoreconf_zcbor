@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <inttypes.h>
 
 #include "../../include/coreconfTypes.h"
 #include "../../include/serialization.h"
@@ -86,7 +87,7 @@ void test_temperature_sensor(void) {
     printf("   SID 1000: temp-sensor-001\n");
     printf("   SID 1001: 23.5\n");
     printf("   SID 1002: celsius\n");
-    printf("   SID 1003: %lu\n\n", (uint64_t)time(NULL));
+    printf("   SID 1003: %" PRIu64 "\n\n", (uint64_t)time(NULL));
     
     CoreconfValueT *decoded = encode_and_measure(data, "Sensor de temperatura");
     

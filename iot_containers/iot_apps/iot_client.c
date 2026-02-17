@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -15,6 +16,7 @@
 
 #include "../../include/coreconfTypes.h"
 #include "../../include/serialization.h"
+#include "../../include/fetch.h"
 #include "../../coreconf_zcbor_generated/zcbor_encode.h"
 #include "../../coreconf_zcbor_generated/zcbor_decode.h"
 
@@ -78,23 +80,6 @@ CoreconfValueT* create_sensor_data(const char *device_type, const char *device_i
     }
     
     return data;
-}
-
-// Crear mensaje de FETCH
-CoreconfValueT* create_fetch_message(const char *device_id, uint64_t sid) {
-    CoreconfValueT *msg = createCoreconfHashmap();
-    CoreconfHashMapT *map = msg->data.map_value;
-    
-    // SID 1: device_id
-    insertCoreconfHashMap(map, 1, createCoreconfString(device_id));
-    
-    // SID 2: operación (fetch)
-    insertCoreconfHashMap(map, 2, createCoreconfString("fetch"));
-    
-    // SID 3: SID a buscar
-    insertCoreconfHashMap(map, 3, createCoreconfUint64(sid));
-    
-    return msg;
 }
 
 int communicate_with_gateway(const char *host, int port, const char *device_type, const char *device_id) {
@@ -184,38 +169,48 @@ int communicate_with_gateway(const char *host, int port, const char *device_type
         freeCoreconf(resp_data, true);
     }
     
-    // ========== PASO 3: FETCH OPERATION ==========
-    printf("\n🔍 PASO 3: FETCH - Pidiendo dato específico\n");
+    // ========== PASO 3: FETCH OPERATION (RFC 9254 3.1.3) ==========
+    printf("\n🔍 PASO 3: FETCH - Pidiendo datos específicos (RFC 9254)\n");
     
-    // Pedir valor de temperatura (SID 20)
-    uint64_t fetch_sid = 20;
-    printf("   Solicitando SID %lu...\n", fetch_sid);
+    // Crear instance-identifiers (soporta SID simple y [SID, key])
+    InstanceIdentifier fetch_ids[] = {
+        {IID_SIMPLE, 20, {.str_key = NULL}},           // SID simple: valor sensor
+        {IID_SIMPLE, 21, {.str_key = NULL}},           // SID simple: unidad
+        {IID_WITH_STR_KEY, 10, {.str_key = "temperature"}}  // [SID, key]: tipo con key
+    };
+    size_t fetch_count = 3;
     
-    CoreconfValueT *fetch_msg = create_fetch_message(device_id, fetch_sid);
+    printf("   Solicitando identificadores:\n");
+    for (size_t i = 0; i < fetch_count; i++) {
+        if (fetch_ids[i].type == IID_SIMPLE) {
+            printf("     - SID %" PRIu64 "\n", fetch_ids[i].sid);
+        } else {
+            printf("     - [%" PRIu64 ", \"%s\"]\n", fetch_ids[i].sid, fetch_ids[i].key.str_key);
+        }
+    }
     
-    zcbor_new_encode_state(enc_states, 5, buffer, BUFFER_SIZE, 0);
+    // Crear CBOR sequence de identificadores usando la librería
+    size_t fetch_len = create_fetch_request_with_iids(buffer, BUFFER_SIZE, fetch_ids, fetch_count);
     
-    if (!coreconfToCBOR(fetch_msg, enc_states)) {
-        printf("   ❌ Error codificando FETCH\n");
-        freeCoreconf(fetch_msg, true);
+    if (fetch_len == 0) {
+        printf("   ❌ Error creando FETCH sequence\n");
         close(sock);
         return -1;
     }
     
-    cbor_len = enc_states[0].payload - buffer;
-    printf("   📦 Mensaje FETCH (%zu bytes):\n", cbor_len);
-    print_cbor_hex(buffer, cbor_len);
+    printf("   📦 FETCH sequence (%zu bytes):\n", fetch_len);
+    print_cbor_hex(buffer, fetch_len);
     
-    sent = send(sock, buffer, cbor_len, 0);
+    sent = send(sock, buffer, fetch_len, 0);
     if (sent > 0) {
         printf("   ✅ FETCH enviado\n");
     } else {
         printf("   ❌ Error enviando FETCH\n");
+        close(sock);
+        return -1;
     }
     
-    freeCoreconf(fetch_msg, true);
-    
-    // Recibir resultado del FETCH
+    // Recibir resultado del FETCH (CBOR sequence de mapas)
     received = recv(sock, response, BUFFER_SIZE, 0);
     
     if (received > 0) {
@@ -223,72 +218,69 @@ int communicate_with_gateway(const char *host, int port, const char *device_type
         printf("   📦 CBOR:\n");
         print_cbor_hex(response, (size_t)received);
         
-        zcbor_new_decode_state(dec_states, 5, response, (size_t)received, 1, NULL, 0);
-        CoreconfValueT *fetch_result = cborToCoreconfValue(dec_states, 0);
+        // Decodificar CBOR sequence de respuestas
+        size_t offset = 0;
+        size_t result_idx = 0;
         
-        if (fetch_result && fetch_result->type == CORECONF_HASHMAP) {
-            printf("   ✅ Resultado decodificado\n\n");
+        printf("   ✅ Resultados decodificados:\n\n");
+        
+        while (offset < (size_t)received && result_idx < fetch_count) {
+            zcbor_new_decode_state(dec_states, 5, response + offset, received - offset, 1, NULL, 0);
+            CoreconfValueT *result_item = cborToCoreconfValue(dec_states, 0);
             
-            CoreconfHashMapT *result_map = fetch_result->data.map_value;
-            
-            // Mostrar el estado de la respuesta
-            CoreconfValueT *status = getCoreconfHashMap(result_map, 100);
-            if (status && status->type == CORECONF_STRING) {
-                printf("   📊 Estado: %s\n", status->data.string_value);
-            }
-            
-            // Buscar y mostrar el valor solicitado (SID 20)
-            CoreconfValueT *fetched_value = getCoreconfHashMap(result_map, fetch_sid);
-            if (fetched_value) {
-                printf("   🎯 Valor recuperado (SID %lu):\n", fetch_sid);
+            if (result_item) {
+                uint64_t requested_sid = fetch_ids[result_idx].sid;
+                printf("   🎯 SID %" PRIu64 ":\n", requested_sid);
                 
-                switch (fetched_value->type) {
-                    case CORECONF_REAL:
-                        printf("      ➜ %.2f", fetched_value->data.real_value);
-                        
-                        // Buscar unidad (SID 21)
-                        CoreconfValueT *unit = getCoreconfHashMap(result_map, 21);
-                        if (unit && unit->type == CORECONF_STRING) {
-                            printf(" %s", unit->data.string_value);
+                if (result_item->type == CORECONF_HASHMAP) {
+                    // Respuesta es un mapa {SID: value}
+                    CoreconfHashMapT *result_map = result_item->data.map_value;
+                    CoreconfValueT *value = getCoreconfHashMap(result_map, requested_sid);
+                    
+                    if (value) {
+                        switch (value->type) {
+                            case CORECONF_REAL:
+                                printf("      ➜ %.2f\n", value->data.real_value);
+                                break;
+                            case CORECONF_INT_64:
+                                printf("      ➜ %" PRId64 "\n", value->data.i64);
+                                break;
+                            case CORECONF_UINT_64:
+                                printf("      ➜ %" PRIu64 "\n", value->data.u64);
+                                break;
+                            case CORECONF_STRING:
+                                printf("      ➜ \"%s\"\n", value->data.string_value);
+                                break;
+                            case CORECONF_TRUE:
+                                printf("      ➜ true\n");
+                                break;
+                            case CORECONF_FALSE:
+                                printf("      ➜ false\n");
+                                break;
+                            case CORECONF_NULL:
+                                printf("      ➜ null (no disponible)\n");
+                                break;
+                            default:
+                                printf("      ➜ (tipo: %d)\n", value->type);
+                                break;
                         }
-                        printf("\n");
-                        break;
-                        
-                    case CORECONF_INT_64:
-                        printf("      ➜ %ld\n", fetched_value->data.i64);
-                        break;
-                        
-                    case CORECONF_UINT_64:
-                        printf("      ➜ %lu\n", fetched_value->data.u64);
-                        break;
-                        
-                    case CORECONF_STRING:
-                        printf("      ➜ \"%s\"\n", fetched_value->data.string_value);
-                        break;
-                        
-                    case CORECONF_TRUE:
-                        printf("      ➜ true\n");
-                        break;
-                        
-                    case CORECONF_FALSE:
-                        printf("      ➜ false\n");
-                        break;
-                        
-                    default:
-                        printf("      ➜ (tipo no reconocido: %d)\n", fetched_value->type);
-                        break;
+                    } else {
+                        printf("      ➜ null (no encontrado)\n");
+                    }
+                } else if (result_item->type == CORECONF_NULL) {
+                    printf("      ➜ null (no soportado por servidor)\n");
                 }
                 
-                printf("   ✅ FETCH completado exitosamente\n");
+                offset += (dec_states[0].payload - (response + offset));
+                freeCoreconf(result_item, true);
             } else {
-                printf("   ⚠️  SID %lu no encontrado en respuesta\n", fetch_sid);
+                break;
             }
             
-            freeCoreconf(fetch_result, true);
-        } else {
-            printf("   ❌ Error: respuesta no válida\n");
-            if (fetch_result) freeCoreconf(fetch_result, true);
+            result_idx++;
         }
+        
+        printf("\n   ✅ FETCH completado exitosamente\n");
     } else {
         printf("   ⚠️  No se recibió resultado del FETCH\n");
     }

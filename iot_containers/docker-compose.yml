@@ -3,7 +3,7 @@ version: '3.8'
 services:
   # Gateway/Coordinador IoT
   iot_gateway:
-    build: .
+    image: iot-coreconf
     container_name: iot_gateway
     hostname: gateway
     environment:
@@ -21,7 +21,7 @@ services:
 
   # Sensor de temperatura
   iot_sensor_temp:
-    build: .
+    image: iot-coreconf
     container_name: iot_sensor_temp
     hostname: sensor-temp
     environment:
@@ -38,7 +38,7 @@ services:
 
   # Sensor de humedad
   iot_sensor_humidity:
-    build: .
+    image: iot-coreconf
     container_name: iot_sensor_humidity
     hostname: sensor-humidity
     environment:
@@ -55,7 +55,7 @@ services:
 
   # Actuador (LED/Relay)
   iot_actuator:
-    build: .
+    image: iot-coreconf
     container_name: iot_actuator
     hostname: actuator
     environment:
@@ -72,7 +72,7 @@ services:
 
   # Edge device (procesamiento local)
   iot_edge:
-    build: .
+    image: iot-coreconf
     container_name: iot_edge
     hostname: edge-device
     environment:

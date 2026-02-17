@@ -67,7 +67,10 @@ static struct bucket *bucket_at0(void *buckets, size_t bucketsz, size_t i) {
     memcpy(bucket, (((char *)buckets) + (bucketsz * i)), sizeof(struct bucket));
     return bucket;
 #else
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align"
     return (struct bucket *)(((char *)buckets) + (bucketsz * i));
+#pragma GCC diagnostic pop
 #endif
 }
 
@@ -567,7 +570,10 @@ static uint64_t MM86128(const void *key, const int len, uint32_t seed) {
     uint32_t *blocks = (uint32_t *)malloc(nblocks * 16);
     memcpy(blocks, (data + nblocks * 16), nblocks * 16);
 #else
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align"
     const uint32_t *blocks = (const uint32_t *)(data + nblocks * 16);
+#pragma GCC diagnostic pop
 #endif
     for (int i = -nblocks; i; i++) {
         uint32_t k1 = blocks[i * 4 + 0];

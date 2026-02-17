@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <inttypes.h>
 
 #include "../include/coreconfTypes.h"
 #include "../include/serialization.h"
@@ -183,7 +184,7 @@ void test_full_fetch_operation(void) {
                 
                 CoreconfValueT *type_val = getCoreconfHashMap(fetched_subtree->data.map_value, 1003);
                 if (type_val) {
-                    printf("  ✓ Type (SID 1003): %lu\n", type_val->data.u64);
+                    printf("  ✓ Type (SID 1003): %" PRIu64 "\n", type_val->data.u64);
                 }
                 
                 CoreconfValueT *ipv4 = getCoreconfHashMap(fetched_subtree->data.map_value, 1010);

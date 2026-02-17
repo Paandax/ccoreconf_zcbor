@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <inttypes.h>
 
 #include "../include/coreconfTypes.h"
 #include "../include/serialization.h"
@@ -45,7 +46,7 @@ void print_coreconf_value(const char *label, CoreconfValueT *val, int indent) {
         case CORECONF_UINT_16:
         case CORECONF_UINT_32:
         case CORECONF_UINT_64:
-            printf("%lu\n", val->data.u64);
+            printf("%" PRIu64 "\n", val->data.u64);
             break;
         case CORECONF_TRUE:
             printf("true\n");
@@ -155,7 +156,7 @@ int main(void) {
     if (ports && ports->type == CORECONF_ARRAY) {
         for (size_t i = 0; i < ports->data.array_value->size; i++) {
             CoreconfValueT *port = &ports->data.array_value->elements[i];
-            printf("    Puerto [%zu]: %lu\n", i, port->data.u64);
+            printf("    Puerto [%zu]: %" PRIu64 "\n", i, port->data.u64);
         }
     }
     

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
@@ -20,6 +21,7 @@
 
 #include "../../include/coreconfTypes.h"
 #include "../../include/serialization.h"
+#include "../../include/fetch.h"
 #include "../../coreconf_zcbor_generated/zcbor_encode.h"
 #include "../../coreconf_zcbor_generated/zcbor_decode.h"
 
@@ -115,7 +117,7 @@ void store_device_data(const char *device_id, CoreconfValueT *data) {
 // Callback para debug: mostrar SIDs
 void print_sid_key(CoreconfObjectT* obj, void* udata) {
     (void)udata;
-    printf("      - SID %lu presente\n", obj->key);
+    printf("      - SID %" PRIu64 " presente\n", obj->key);
 }
 
 // FETCH: Buscar valor por SID
@@ -126,41 +128,19 @@ CoreconfValueT* fetch_by_sid(CoreconfValueT *source, uint64_t sid) {
     }
     
     CoreconfHashMapT *map = source->data.map_value;
-    printf("   🔎 Buscando SID %lu en mapa con size=%zu\n", sid, map->size);
+    printf("   🔎 Buscando SID %" PRIu64 " en mapa con size=%zu\n", sid, map->size);
     
     // Listar todos los SIDs
     iterateCoreconfHashMap(map, NULL, print_sid_key);
     
     CoreconfValueT *result = getCoreconfHashMap(map, sid);
     if (result) {
-        printf("   ✅ SID %lu encontrado\n", sid);
+        printf("   ✅ SID %" PRIu64 " encontrado\n", sid);
     } else {
-        printf("   ❌ SID %lu NO encontrado\n", sid);
+        printf("   ❌ SID %" PRIu64 " NO encontrado\n", sid);
     }
     
     return result;
-}
-
-// Crear respuesta FETCH
-CoreconfValueT* create_fetch_response(const char *device_id, CoreconfValueT *result, uint64_t sid) {
-    CoreconfValueT *response = createCoreconfHashmap();
-    CoreconfHashMapT *map = response->data.map_value;
-    
-    // Status (SID 100)
-    insertCoreconfHashMap(map, 100, createCoreconfString("ok"));
-    
-    // Device ID (SID 101)
-    insertCoreconfHashMap(map, 101, createCoreconfString(device_id));
-    
-    // Timestamp (SID 102)
-    insertCoreconfHashMap(map, 102, createCoreconfUint64((uint64_t)time(NULL)));
-    
-    // Resultado del fetch con el SID ORIGINAL solicitado
-    if (result) {
-        insertCoreconfHashMap(map, sid, result);
-    }
-    
-    return response;
 }
 
 void handle_client_connection(int client_sock, struct sockaddr_in *client_addr) {
@@ -192,96 +172,106 @@ void handle_client_connection(int client_sock, struct sockaddr_in *client_addr) 
         printf("   📦 CBOR:\n");
         print_cbor_hex(buffer, (size_t)bytes_received);
         
-        // Decodificar CBOR
+        // Intentar decodificar como mapa CBOR (STORE operation)
         zcbor_state_t states[5];
         zcbor_new_decode_state(states, 5, buffer, (size_t)bytes_received, 1, NULL, 0);
         CoreconfValueT *received_data = cborToCoreconfValue(states, 0);
     
-        if (!received_data) {
-            printf("   ❌ Error decodificando CBOR\n");
-            break;
-        }
-    
-    printf("   ✅ CBOR decodificado\n");
-    
-    // Procesar mensaje (buscar device_id y operación)
-    CoreconfValueT *response = NULL;
-    
-    if (received_data->type == CORECONF_HASHMAP) {
-        CoreconfHashMapT *msg = received_data->data.map_value;
+        uint8_t response_buffer[BUFFER_SIZE];
+        size_t response_len = 0;
         
-        // Obtener device_id (SID 1)
-        CoreconfValueT *device_id_val = getCoreconfHashMap(msg, 1);
-        const char *device_id = device_id_val && device_id_val->type == CORECONF_STRING 
-                                ? device_id_val->data.string_value : "unknown";
-        
-        printf("   📊 Dispositivo: %s\n", device_id);
-        
-        // Obtener tipo de operación (SID 2)
-        CoreconfValueT *op_val = getCoreconfHashMap(msg, 2);
-        const char *operation = op_val && op_val->type == CORECONF_STRING 
-                               ? op_val->data.string_value : "store";
-        
-        printf("   🔧 Operación: %s\n", operation);
-        
-        if (strcmp(operation, "fetch") == 0) {
-            // FETCH: buscar SID específico
-            CoreconfValueT *sid_val = getCoreconfHashMap(msg, 3);
-            if (sid_val && sid_val->type == CORECONF_UINT_64) {
-                uint64_t sid = sid_val->data.u64;
-                printf("   🔍 FETCH SID %lu\n", sid);
-                
-                // Buscar en dispositivo almacenado
-                CoreconfValueT *device_data = NULL;
-                for (int i = 0; i < device_count; i++) {
-                    if (strcmp(devices[i].device_id, device_id) == 0) {
-                        device_data = fetch_by_sid(devices[i].data, sid);
-                        break;
-                    }
-                }
-                
-                if (device_data) {
-                    printf("   ✅ FETCH encontró valor para SID %lu\n", sid);
-                    response = create_fetch_response(device_id, device_data, sid);
-                } else {
-                    printf("   ❌ FETCH no encontró SID %lu\n", sid);
-                    response = create_fetch_response(device_id, NULL, sid);
-                }
-            }
-        } else {
-            // STORE: almacenar datos
+        // Verificar si es STORE (HASHMAP) o FETCH (CBOR sequence de SIDs)
+        if (received_data && received_data->type == CORECONF_HASHMAP) {
+            // ========== OPERACIÓN STORE ==========
+            printf("   ✅ CBOR decodificado\n");
+            
+            CoreconfHashMapT *msg = received_data->data.map_value;
+            
+            // Obtener device_id (SID 1)
+            CoreconfValueT *device_id_val = getCoreconfHashMap(msg, 1);
+            const char *device_id = device_id_val && device_id_val->type == CORECONF_STRING 
+                                    ? device_id_val->data.string_value : "unknown";
+            
+            printf("   📊 Dispositivo: %s\n", device_id);
+            printf("   🔧 Operación: store\n");
             printf("   💾 Almacenando datos del dispositivo\n");
             store_device_data(device_id, received_data);
-            response = create_fetch_response(device_id, NULL, 0);
-        }
-    }
-    
-        // Enviar respuesta
-        if (response) {
-            uint8_t response_buffer[BUFFER_SIZE];
+            
+            // Crear respuesta ACK simple
+            CoreconfValueT *ack = createCoreconfHashmap();
+            CoreconfHashMapT *ack_map = ack->data.map_value;
+            insertCoreconfHashMap(ack_map, 100, createCoreconfString("ok"));
+            insertCoreconfHashMap(ack_map, 101, createCoreconfString(device_id));
+            insertCoreconfHashMap(ack_map, 102, createCoreconfUint64((uint64_t)time(NULL)));
+            
             zcbor_state_t resp_states[5];
             zcbor_new_encode_state(resp_states, 5, response_buffer, BUFFER_SIZE, 0);
             
-            if (coreconfToCBOR(response, resp_states)) {
-                size_t response_len = resp_states[0].payload - response_buffer;
-                printf("   📤 Enviando respuesta (%zu bytes)\n", response_len);
-                printf("   📦 CBOR:\n");
-                print_cbor_hex(response_buffer, response_len);
-                
-                ssize_t sent = send(client_sock, response_buffer, response_len, 0);
-                if (sent > 0) {
-                    printf("   ✅ Respuesta enviada\n");
-                } else {
-                    printf("   ❌ Error enviando respuesta\n");
-                    freeCoreconf(response, true);
-                    break;
+            if (coreconfToCBOR(ack, resp_states)) {
+                response_len = resp_states[0].payload - response_buffer;
+            }
+            
+            freeCoreconf(ack, true);
+            freeCoreconf(received_data, true);
+            
+        } else {
+            // ========== OPERACIÓN FETCH (RFC 9254 3.1.3) ==========
+            printf("   🔍 Detectado FETCH (CBOR sequence)\n");
+            
+            // Decodificar CBOR sequence de instance-identifiers usando la librería
+            InstanceIdentifier *fetch_iids = NULL;
+            size_t iid_count = 0;
+            
+            if (!parse_fetch_request_iids(buffer, (size_t)bytes_received, &fetch_iids, &iid_count)) {
+                printf("   ❌ Error parseando FETCH request\n");
+                if (received_data) freeCoreconf(received_data, true);
+                continue;
+            }
+            
+            printf("   📋 Identificadores solicitados:\n");
+            for (size_t i = 0; i < iid_count; i++) {
+                if (fetch_iids[i].type == IID_SIMPLE) {
+                    printf("      - SID %" PRIu64 "\n", fetch_iids[i].sid);
+                } else if (fetch_iids[i].type == IID_WITH_STR_KEY) {
+                    printf("      - [%" PRIu64 ", \"%s\"]\n", fetch_iids[i].sid, fetch_iids[i].key.str_key);
+                } else if (fetch_iids[i].type == IID_WITH_INT_KEY) {
+                    printf("      - [%" PRIu64 ", %" PRId64 "]\n", fetch_iids[i].sid, fetch_iids[i].key.int_key);
                 }
             }
             
-            freeCoreconf(response, true);
+            // Buscar datos del último dispositivo almacenado (para esta demo simplificada)
+            CoreconfValueT *device_data = device_count > 0 ? devices[device_count - 1].data : NULL;
+            
+            if (device_data) {
+                printf("   🗂️  Buscando en dispositivo: %s\n", devices[device_count - 1].device_id);
+            } else {
+                printf("   ⚠️  No hay dispositivos almacenados\n");
+            }
+            
+            // Crear respuesta CBOR sequence usando instance-identifiers (RFC 9254 completo)
+            response_len = create_fetch_response_iids(response_buffer, BUFFER_SIZE,
+                                                      device_data, fetch_iids, iid_count);
+            
+            free_instance_identifiers(fetch_iids, iid_count);
+            if (received_data) freeCoreconf(received_data, true);
         }
         
-        freeCoreconf(received_data, true);
+        // Enviar respuesta
+        if (response_len > 0) {
+            printf("   📤 Enviando respuesta (%zu bytes)\n", response_len);
+            printf("   📦 CBOR:\n");
+            print_cbor_hex(response_buffer, response_len);
+            
+            ssize_t sent = send(client_sock, response_buffer, response_len, 0);
+            if (sent > 0) {
+                printf("   ✅ Respuesta enviada\n");
+            } else {
+                printf("   ❌ Error enviando respuesta\n");
+                break;
+            }
+        } else {
+            printf("   ❌ Error: sin respuesta para enviar\n");
+        }
     }
     
     close(client_sock);
