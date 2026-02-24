@@ -10,7 +10,7 @@ services:
       - DEVICE_ID=gateway-001
       - DEVICE_TYPE=gateway
     ports:
-      - "5683:5683"
+      - "5683:5683/udp"
       - "8080:8080"
     networks:
       iot_network:

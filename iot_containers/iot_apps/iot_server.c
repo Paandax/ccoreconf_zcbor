@@ -1,21 +1,49 @@
 /**
- * iot_server.c - Servidor IoT Gateway usando CORECONF/CBOR con FETCH
+ * iot_server.c - Servidor IoT Gateway usando CORECONF/CBOR sobre CoAP (libcoap)
  * 
- * Simula un gateway IoT que:
- * 1. Recibe datos CBOR de dispositivos
- * 2. Decodifica y almacena
- * 3. Responde con operaciones FETCH
+ * OBJETIVO: Gateway IoT que escucha en CoAP UDP:5683 y:
+ *   1. Recibe POST /c con CBOR → almacena datos del dispositivo (STORE)
+ *   2. Recibe FETCH /c con CBOR sequence → responde con los valores pedidos
+ * 
+ * COMPILAR:
+ *   gcc iot_server.c ccoreconf.a -lcoap-3 -I../include -I../coreconf_zcbor_generated -o iot_server
+ * 
+ * FLUJO CoAP:
+ *
+ *   [STORE - dispositivo envía datos]
+ *   Cliente                        Servidor (este programa)
+ *   -------                        ------------------------
+ *     |  CON [POST /c]               |
+ *     |  Content-Format: 60 (CBOR)   |
+ *     |  Payload: {1:id, 20:valor}   |
+ *     |------------------------------>|  → handle_post_store()
+ *     |  ACK [2.04 Changed]          |  → store_device_data()
+ *     |<------------------------------|
+ *
+ *   [FETCH - dispositivo pide datos]
+ *   Cliente                        Servidor
+ *     |  CON [FETCH /c]              |
+ *     |  Content-Format: 60 (CBOR)   |
+ *     |  Payload: CBOR sequence iids |
+ *     |------------------------------>|  → handle_fetch_coreconf()
+ *     |  ACK [2.05 Content]          |  → parse_fetch_request_iids()
+ *     |  Payload: CBOR sequence vals |  → create_fetch_response_iids()
+ *     |<------------------------------|
+ *
+ * LÓGICA CORECONF (ya implementada):
+ *   - store_device_data()             → guarda en base de datos mock
+ *   - parse_fetch_request_iids()      → decodifica los SIDs pedidos
+ *   - create_fetch_response_iids()    → genera la respuesta CBOR
+ *
+ * TU TRABAJO: Completar los TODOs de libcoap (handlers + main)
  */
 
+#include <coap3/coap.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <inttypes.h>
-#include <sys/socket.h>
-#include <sys/wait.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <time.h>
 #include <signal.h>
 
@@ -25,8 +53,17 @@
 #include "../../coreconf_zcbor_generated/zcbor_encode.h"
 #include "../../coreconf_zcbor_generated/zcbor_decode.h"
 
-#define PORT 5683
 #define BUFFER_SIZE 4096
+
+static int quit = 0;
+
+/*
+ * ============================================================================
+ * BASE DE DATOS GLOBAL (mock)
+ * ============================================================================
+ * Almacena los datos de cada dispositivo que hace STORE.
+ * En producción sería una base de datos real.
+ */
 
 // Base de datos global simulada
 typedef struct {
@@ -36,8 +73,8 @@ typedef struct {
 } DeviceRecord;
 
 #define MAX_DEVICES 10
-DeviceRecord devices[MAX_DEVICES];
-int device_count = 0;
+static DeviceRecord devices[MAX_DEVICES];
+static int device_count = 0;
 
 void print_cbor_hex(const uint8_t *data, size_t len) {
     printf("   ");
@@ -143,206 +180,350 @@ CoreconfValueT* fetch_by_sid(CoreconfValueT *source, uint64_t sid) {
     return result;
 }
 
-void handle_client_connection(int client_sock, struct sockaddr_in *client_addr) {
-    char client_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &client_addr->sin_addr, client_ip, INET_ADDRSTRLEN);
-    
-    printf("\n🔗 Nueva conexión desde %s:%d\n", client_ip, ntohs(client_addr->sin_port));
-    
-    uint8_t buffer[BUFFER_SIZE];
-    int message_count = 0;
-    
-    // Loop para manejar múltiples mensajes en la misma conexión
-    while (1) {
-        message_count++;
-        printf("\n   ━━━ Mensaje #%d ━━━\n", message_count);
-        
-        ssize_t bytes_received = recv(client_sock, buffer, BUFFER_SIZE, 0);
-        
-        if (bytes_received <= 0) {
-            if (bytes_received == 0) {
-                printf("   ℹ️  Cliente cerró la conexión\n");
-            } else {
-                printf("   ❌ Error recibiendo datos\n");
-            }
-            break;
-        }
-        
-        printf("   📥 Recibidos %zd bytes\n", bytes_received);
-        printf("   📦 CBOR:\n");
-        print_cbor_hex(buffer, (size_t)bytes_received);
-        
-        // Intentar decodificar como mapa CBOR (STORE operation)
-        zcbor_state_t states[5];
-        zcbor_new_decode_state(states, 5, buffer, (size_t)bytes_received, 1, NULL, 0);
-        CoreconfValueT *received_data = cborToCoreconfValue(states, 0);
-    
-        uint8_t response_buffer[BUFFER_SIZE];
-        size_t response_len = 0;
-        
-        // Verificar si es STORE (HASHMAP) o FETCH (CBOR sequence de SIDs)
-        if (received_data && received_data->type == CORECONF_HASHMAP) {
-            // ========== OPERACIÓN STORE ==========
-            printf("   ✅ CBOR decodificado\n");
-            
-            CoreconfHashMapT *msg = received_data->data.map_value;
-            
-            // Obtener device_id (SID 1)
-            CoreconfValueT *device_id_val = getCoreconfHashMap(msg, 1);
-            const char *device_id = device_id_val && device_id_val->type == CORECONF_STRING 
-                                    ? device_id_val->data.string_value : "unknown";
-            
-            printf("   📊 Dispositivo: %s\n", device_id);
-            printf("   🔧 Operación: store\n");
-            printf("   💾 Almacenando datos del dispositivo\n");
-            store_device_data(device_id, received_data);
-            
-            // Crear respuesta ACK simple
-            CoreconfValueT *ack = createCoreconfHashmap();
-            CoreconfHashMapT *ack_map = ack->data.map_value;
-            insertCoreconfHashMap(ack_map, 100, createCoreconfString("ok"));
-            insertCoreconfHashMap(ack_map, 101, createCoreconfString(device_id));
-            insertCoreconfHashMap(ack_map, 102, createCoreconfUint64((uint64_t)time(NULL)));
-            
-            zcbor_state_t resp_states[5];
-            zcbor_new_encode_state(resp_states, 5, response_buffer, BUFFER_SIZE, 0);
-            
-            if (coreconfToCBOR(ack, resp_states)) {
-                response_len = resp_states[0].payload - response_buffer;
-            }
-            
-            freeCoreconf(ack, true);
-            freeCoreconf(received_data, true);
-            
-        } else {
-            // ========== OPERACIÓN FETCH (RFC 9254 3.1.3) ==========
-            printf("   🔍 Detectado FETCH (CBOR sequence)\n");
-            
-            // Decodificar CBOR sequence de instance-identifiers usando la librería
-            InstanceIdentifier *fetch_iids = NULL;
-            size_t iid_count = 0;
-            
-            if (!parse_fetch_request_iids(buffer, (size_t)bytes_received, &fetch_iids, &iid_count)) {
-                printf("   ❌ Error parseando FETCH request\n");
-                if (received_data) freeCoreconf(received_data, true);
-                continue;
-            }
-            
-            printf("   📋 Identificadores solicitados:\n");
-            for (size_t i = 0; i < iid_count; i++) {
-                if (fetch_iids[i].type == IID_SIMPLE) {
-                    printf("      - SID %" PRIu64 "\n", fetch_iids[i].sid);
-                } else if (fetch_iids[i].type == IID_WITH_STR_KEY) {
-                    printf("      - [%" PRIu64 ", \"%s\"]\n", fetch_iids[i].sid, fetch_iids[i].key.str_key);
-                } else if (fetch_iids[i].type == IID_WITH_INT_KEY) {
-                    printf("      - [%" PRIu64 ", %" PRId64 "]\n", fetch_iids[i].sid, fetch_iids[i].key.int_key);
-                }
-            }
-            
-            // Buscar datos del último dispositivo almacenado (para esta demo simplificada)
-            CoreconfValueT *device_data = device_count > 0 ? devices[device_count - 1].data : NULL;
-            
-            if (device_data) {
-                printf("   🗂️  Buscando en dispositivo: %s\n", devices[device_count - 1].device_id);
-            } else {
-                printf("   ⚠️  No hay dispositivos almacenados\n");
-            }
-            
-            // Crear respuesta CBOR sequence usando instance-identifiers (RFC 9254 completo)
-            response_len = create_fetch_response_iids(response_buffer, BUFFER_SIZE,
-                                                      device_data, fetch_iids, iid_count);
-            
-            free_instance_identifiers(fetch_iids, iid_count);
-            if (received_data) freeCoreconf(received_data, true);
-        }
-        
-        // Enviar respuesta
-        if (response_len > 0) {
-            printf("   📤 Enviando respuesta (%zu bytes)\n", response_len);
-            printf("   📦 CBOR:\n");
-            print_cbor_hex(response_buffer, response_len);
-            
-            ssize_t sent = send(client_sock, response_buffer, response_len, 0);
-            if (sent > 0) {
-                printf("   ✅ Respuesta enviada\n");
-            } else {
-                printf("   ❌ Error enviando respuesta\n");
-                break;
-            }
-        } else {
-            printf("   ❌ Error: sin respuesta para enviar\n");
-        }
+/*
+ * ============================================================================
+ * HANDLER CoAP: POST /c → STORE
+ * ============================================================================
+ * Se ejecuta cuando un dispositivo envía sus datos (POST /c con CBOR).
+ * Tu trabajo: extraer el payload y configurar la respuesta CoAP.
+ * La lógica CORECONF (store_device_data) ya está implementada.
+ *
+ * PARÁMETROS CoAP:
+ *   resource → el recurso /c que recibió la petición
+ *   session  → sesión del dispositivo cliente
+ *   request  → PDU con el CBOR del dispositivo (payload = datos del sensor)
+ *   response → PDU de respuesta (ya creado, solo hay que rellenarlo)
+ */
+static void handle_post_store(coap_resource_t *resource,
+                              coap_session_t *session,
+                              const coap_pdu_t *request,
+                              const coap_string_t *query,
+                              coap_pdu_t *response) {
+    (void)resource; (void)session; (void)query;
+
+    printf("\n📥 POST /c recibido (STORE)\n");
+
+    size_t payload_len;
+    const uint8_t *payload_data;
+
+    /*
+     * ========================================================================
+     * TODO 1: Extraer payload CBOR del request
+     * ========================================================================
+     * FUNCIÓN: coap_get_data(pdu, &longitud, &datos)
+     * Retorna: 1 si hay payload, 0 si no
+     *
+     * Si no hay payload → responder con COAP_RESPONSE_CODE_BAD_REQUEST
+     */
+    // ESCRIBE AQUÍ:
+    if (!coap_get_data(request, &payload_len, &payload_data)) {
+        printf("   ❌ No hay payload en el request\n");
+        coap_pdu_set_code(response, COAP_RESPONSE_CODE_BAD_REQUEST);
+        return;
     }
-    
-    close(client_sock);
-    printf("   🔌 Conexión cerrada (total mensajes: %d)\n", message_count);
+
+
+    printf("   📦 CBOR recibido (%zu bytes)\n", payload_len);
+    print_cbor_hex(payload_data, payload_len);
+
+    /* ── Lógica CORECONF (ya implementada, no tocar) ── */
+    zcbor_state_t states[5];
+    zcbor_new_decode_state(states, 5, payload_data, payload_len, 1, NULL, 0);
+    CoreconfValueT *received_data = cborToCoreconfValue(states, 0);
+
+    if (!received_data || received_data->type != CORECONF_HASHMAP) {
+        printf("   ❌ CBOR inválido o no es hashmap\n");
+        coap_pdu_set_code(response, COAP_RESPONSE_CODE_BAD_REQUEST);
+        if (received_data) freeCoreconf(received_data, true);
+        return;
+    }
+
+    CoreconfHashMapT *msg = received_data->data.map_value;
+    CoreconfValueT *device_id_val = getCoreconfHashMap(msg, 1);
+    const char *device_id = (device_id_val && device_id_val->type == CORECONF_STRING)
+                            ? device_id_val->data.string_value : "unknown";
+
+    printf("   📊 Dispositivo: %s\n", device_id);
+    store_device_data(device_id, received_data);
+    /* ── Fin lógica CORECONF ── */
+
+    /*
+     * ========================================================================
+     * TODO 2: Configurar respuesta CoAP
+     * ========================================================================
+     * Para STORE la respuesta correcta es 2.04 Changed (no 2.05 Content).
+     * No lleva payload (solo el código de respuesta).
+     *
+     * FUNCIÓN: coap_pdu_set_code(response, COAP_RESPONSE_CODE_CHANGED)
+     */
+    // ESCRIBE AQUÍ:
+    coap_pdu_set_code(response, COAP_RESPONSE_CODE_CHANGED);
+
+
+    printf("   ✅ STORE completado → 2.04 Changed\n");
 }
 
-void sigchld_handler(int sig) {
-    (void)sig;
-    while (waitpid(-1, NULL, WNOHANG) > 0);
+/*
+ * ============================================================================
+ * HANDLER CoAP: FETCH /c → responder con valores pedidos
+ * ============================================================================
+ * Se ejecuta cuando un dispositivo pide datos con FETCH /c.
+ * El payload del request es una CBOR sequence de instance-identifiers.
+ * Tu trabajo: extraer payload, llamar a las funciones CORECONF y enviar respuesta.
+ *
+ * DIFERENCIA con POST:
+ *   - POST: el cliente envía datos al servidor
+ *   - FETCH: el cliente pide datos específicos (como GET pero con payload)
+ */
+static void handle_fetch_coreconf(coap_resource_t *resource,
+                                  coap_session_t *session,
+                                  const coap_pdu_t *request,
+                                  const coap_string_t *query,
+                                  coap_pdu_t *response) {
+    (void)resource; (void)session; (void)query;
+
+    printf("\n📥 FETCH /c recibido\n");
+
+    size_t payload_len;
+    const uint8_t *payload_data;
+
+    /*
+     * ========================================================================
+     * TODO 3: Extraer payload CBOR del request
+     * ========================================================================
+     * Igual que en el handler POST.
+     * Si no hay payload → responder con COAP_RESPONSE_CODE_BAD_REQUEST
+     */
+    // ESCRIBE AQUÍ:
+    if(!coap_get_data(request, &payload_len, &payload_data)) {
+        printf("   ❌ No hay payload en el request\n");
+        coap_pdu_set_code(response, COAP_RESPONSE_CODE_BAD_REQUEST);
+        return;
+    }
+
+    printf("   📦 CBOR sequence recibida (%zu bytes)\n", payload_len);
+    print_cbor_hex(payload_data, payload_len);
+
+    /* ── Lógica CORECONF (ya implementada, no tocar) ── */
+    InstanceIdentifier *fetch_iids = NULL;
+    size_t iid_count = 0;
+
+    if (!parse_fetch_request_iids(payload_data, payload_len, &fetch_iids, &iid_count)) {
+        printf("   ❌ Error parseando FETCH request\n");
+        coap_pdu_set_code(response, COAP_RESPONSE_CODE_BAD_REQUEST);
+        return;
+    }
+
+    printf("   📋 Identificadores solicitados (%zu):\n", iid_count);
+    for (size_t i = 0; i < iid_count; i++) {
+        if (fetch_iids[i].type == IID_SIMPLE)
+            printf("      - SID %" PRIu64 "\n", fetch_iids[i].sid);
+        else if (fetch_iids[i].type == IID_WITH_STR_KEY)
+            printf("      - [%" PRIu64 ", \"%s\"]\n", fetch_iids[i].sid, fetch_iids[i].key.str_key);
+        else if (fetch_iids[i].type == IID_WITH_INT_KEY)
+            printf("      - [%" PRIu64 ", %" PRId64 "]\n", fetch_iids[i].sid, fetch_iids[i].key.int_key);
+    }
+
+    CoreconfValueT *device_data = device_count > 0 ? devices[device_count - 1].data : NULL;
+    if (device_data)
+        printf("   🗂️  Buscando en: %s\n", devices[device_count - 1].device_id);
+    else
+        printf("   ⚠️  No hay dispositivos almacenados\n");
+
+    uint8_t response_buffer[BUFFER_SIZE];
+    size_t response_len = create_fetch_response_iids(response_buffer, BUFFER_SIZE,
+                                                     device_data, fetch_iids, iid_count);
+    free_instance_identifiers(fetch_iids, iid_count);
+
+    if (response_len == 0) {
+        printf("   ❌ Error generando respuesta CBOR\n");
+        coap_pdu_set_code(response, COAP_RESPONSE_CODE_INTERNAL_ERROR);
+        return;
+    }
+
+    printf("   📦 Respuesta CBOR (%zu bytes)\n", response_len);
+    print_cbor_hex(response_buffer, response_len);
+    /* ── Fin lógica CORECONF ── */
+
+    /*
+     * ========================================================================
+     * TODO 4: Configurar respuesta CoAP con el CBOR generado
+     * ========================================================================
+     * PASOS:
+     *   4.1 → coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT)
+     *
+     *   4.2 → Añadir Content-Format: 60 (CBOR)
+     *         uint8_t cf_buf[4];
+     *         size_t cf_len = coap_encode_var_safe(cf_buf, sizeof(cf_buf), 60);
+     *         coap_add_option(response, COAP_OPTION_CONTENT_FORMAT, cf_len, cf_buf);
+     *
+     *   4.3 → coap_add_data(response, response_len, response_buffer)
+     */
+    // 4.1 ESCRIBE AQUÍ:
+    coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
+
+    // 4.2 ESCRIBE AQUÍ:
+    uint8_t content_format_buf[4];
+    size_t content_format_len = coap_encode_var_safe(content_format_buf, sizeof(content_format_buf), 60);
+    coap_add_option(response, COAP_OPTION_CONTENT_FORMAT, content_format_len, content_format_buf);
+    // 4.3 ESCRIBE AQUÍ:
+    coap_add_data(response, response_len, response_buffer);
+
+    printf("   ✅ FETCH completado → 2.05 Content\n");
 }
 
+/*
+ * ============================================================================
+ * Handler Ctrl+C
+ * ============================================================================
+ */
+static void handle_sigint(int signum) {
+    (void)signum;
+    quit = 1;
+    printf("\n🛑 Señal recibida, cerrando servidor...\n");
+}
+
+/*
+ * ============================================================================
+ * MAIN: Configurar y arrancar servidor CoAP
+ * ============================================================================
+ */
 int main(void) {
     printf("╔═══════════════════════════════════════════════════════════╗\n");
-    printf("║    IoT GATEWAY - CORECONF/CBOR con FETCH OPERATIONS      ║\n");
+    printf("║   IoT GATEWAY - CORECONF/CBOR sobre CoAP (libcoap)       ║\n");
     printf("╚═══════════════════════════════════════════════════════════╝\n\n");
-    
-    const char *device_id = getenv("DEVICE_ID");
-    printf("🔧 Gateway ID: %s\n", device_id ? device_id : "gateway-001");
-    printf("📡 Escuchando en puerto %d\n\n", PORT);
-    
-    signal(SIGCHLD, sigchld_handler);
-    
-    // Crear socket
-    int server_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_sock < 0) {
-        perror("❌ Error creando socket");
+
+    const char *device_id_env = getenv("DEVICE_ID");
+    printf("🔧 Gateway ID: %s\n", device_id_env ? device_id_env : "gateway-001");
+    printf("📡 Puerto CoAP UDP: 5683\n\n");
+
+    signal(SIGINT, handle_sigint);
+
+    /*
+     * ========================================================================
+     * TODO 5: Inicializar libcoap
+     * ========================================================================
+     * FUNCIÓN: coap_startup()
+     * Siempre lo primero antes de cualquier función de libcoap.
+     */
+    // ESCRIBE AQUÍ:
+    coap_startup();
+
+    /*
+     * ========================================================================
+     * TODO 6: Configurar dirección de escucha
+     * ========================================================================
+     * El servidor escucha en todas las interfaces (INADDR_ANY), puerto 5683.
+     *
+     * PASOS:
+     *   coap_address_t listen_addr;
+     *   coap_address_init(&listen_addr);
+     *   listen_addr.addr.sin.sin_family = AF_INET;
+     *   listen_addr.addr.sin.sin_port   = htons(5683);
+     *   listen_addr.addr.sin.sin_addr.s_addr = INADDR_ANY;
+     */
+    // ESCRIBE AQUÍ:
+    coap_address_t listen_addr;
+    coap_address_init(&listen_addr);
+    listen_addr.addr.sin.sin_family = AF_INET;
+    listen_addr.addr.sin.sin_port = htons(5683);
+    listen_addr.addr.sin.sin_addr.s_addr = INADDR_ANY;
+
+    /*
+     * ========================================================================
+     * TODO 7: Crear contexto CoAP con la dirección de escucha
+     * ========================================================================
+     * DIFERENCIA cliente/servidor:
+     *   Cliente → coap_new_context(NULL)          (libcoap elige puerto)
+     *   Servidor → coap_new_context(&listen_addr) (bind en 5683)
+     */
+    coap_context_t *ctx = NULL;
+    // ESCRIBE AQUÍ:
+    ctx = coap_new_context(&listen_addr);
+
+    if (!ctx) {
+        fprintf(stderr, "❌ Error creando contexto\n");
         return 1;
     }
-    
-    int opt = 1;
-    setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    
-    struct sockaddr_in server_addr = {0};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT);
-    
-    if (bind(server_sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("❌ Error en bind");
-        close(server_sock);
+    printf("✅ Escuchando en 0.0.0.0:5683 (UDP)\n");
+
+    /*
+     * ========================================================================
+     * TODO 8: Crear recurso /c
+     * ========================================================================
+     * FUNCIÓN: coap_resource_init(coap_make_str_const("c"), 0)
+     * Este es el endpoint CORECONF estándar (RFC 9254 usa /c)
+     */
+    coap_resource_t *resource = NULL;
+    // ESCRIBE AQUÍ:
+    resource = coap_resource_init(coap_make_str_const("c"), 0);
+
+    if (!resource) {
+        fprintf(stderr, "❌ Error creando recurso\n");
+        coap_free_context(ctx);
         return 1;
     }
-    
-    if (listen(server_sock, 5) < 0) {
-        perror("❌ Error en listen");
-        close(server_sock);
-        return 1;
+
+    /*
+     * ========================================================================
+     * TODO 9: Registrar handlers para POST y FETCH
+     * ========================================================================
+     * FUNCIÓN: coap_register_handler(resource, método, función)
+     *
+     * MÉTODOS disponibles:
+     *   COAP_REQUEST_POST   → STORE (el dispositivo sube datos)
+     *   COAP_REQUEST_FETCH  → FETCH (el dispositivo pide datos)
+     *
+     * Necesitas registrar los dos:
+     *   coap_register_handler(resource, COAP_REQUEST_POST,  handle_post_store);
+     *   coap_register_handler(resource, COAP_REQUEST_FETCH, handle_fetch_coreconf);
+     */
+    // ESCRIBE AQUÍ:
+    coap_register_handler(resource, COAP_REQUEST_POST, handle_post_store);
+    coap_register_handler(resource, COAP_REQUEST_FETCH, handle_fetch_coreconf);
+
+    /*
+     * ========================================================================
+     * TODO 10: Añadir recurso al contexto
+     * ========================================================================
+     * FUNCIÓN: coap_add_resource(ctx, resource)
+     */
+    // ESCRIBE AQUÍ:
+    coap_add_resource(ctx, resource);
+
+    printf("✅ Recurso /c registrado\n");
+    printf("   Métodos: POST (STORE) | FETCH (CORECONF RFC 9254)\n");
+    printf("   Content-Type: application/cbor (60)\n\n");
+    printf("⏳ Esperando peticiones (Ctrl+C para salir)...\n\n");
+
+    /*
+     * ========================================================================
+     * TODO 11: Loop principal del servidor
+     * ========================================================================
+     * FUNCIÓN: coap_io_process(ctx, timeout_ms)
+     *
+     * Igual que en el servidor del ejercicio 2:
+     * - Espera peticiones en el socket UDP
+     * - Cuando llega una, llama al handler correspondiente (POST o FETCH)
+     * - El timeout de 1000ms permite salir limpiamente con Ctrl+C
+     */
+    while (!quit) {
+        // ESCRIBE AQUÍ:
+        coap_io_process(ctx, 1000);
     }
-    
-    printf("✅ Servidor listo. Esperando conexiones...\n\n");
-    
-    // Accept loop
-    while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-        
-        int client_sock = accept(server_sock, (struct sockaddr*)&client_addr, &client_len);
-        if (client_sock >= 0) {
-            pid_t pid = fork();
-            if (pid == 0) {
-                // Proceso hijo
-                close(server_sock);
-                handle_client_connection(client_sock, &client_addr);
-                exit(0);
-            } else {
-                // Proceso padre
-                close(client_sock);
-            }
-        }
-    }
-    
-    close(server_sock);
+
+    /*
+     * ========================================================================
+     * TODO 12: Limpieza
+     * ========================================================================
+     * coap_free_context(ctx)  → libera contexto, recursos y sesiones
+     * coap_cleanup()          → cleanup global de libcoap
+     */
+    printf("\n🧹 Liberando recursos...\n");
+    // ESCRIBE AQUÍ:
+    coap_free_context(ctx);
+    coap_cleanup();
+
+    printf("✨ Gateway cerrado correctamente\n");
     return 0;
 }

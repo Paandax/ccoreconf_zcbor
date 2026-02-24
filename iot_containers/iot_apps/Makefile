@@ -1,8 +1,10 @@
 # Makefile para aplicaciones IoT
 
 CC = gcc
-CFLAGS = -Wall -Wextra -pedantic -std=c11 -Werror -I../../include -I../../coreconf_zcbor_generated
-LDFLAGS = -L../.. -pthread
+LIBCOAP_INC = /Users/pablo/Desktop/coap_learning/libcoap/include
+LIBCOAP_LIB = /Users/pablo/Desktop/coap_learning/libcoap/build
+CFLAGS = -Wall -Wextra -pedantic -std=c11 -Werror -I../../include -I../../coreconf_zcbor_generated -I$(LIBCOAP_INC) -I$(LIBCOAP_LIB)
+LDFLAGS = -L../.. -L$(LIBCOAP_LIB) -lcoap-3 -pthread
 
 # Biblioteca ccoreconf
 LIB = ../../ccoreconf.a

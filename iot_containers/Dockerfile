@@ -4,15 +4,18 @@ FROM ubuntu:22.04
 # Evitar prompts interactivos
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Instalar dependencias básicas
+# Instalar dependencias básicas + libcoap3
 RUN apt-get update && apt-get install -y \
     build-essential \
     gcc \
     make \
+    pkg-config \
     netcat-traditional \
     iproute2 \
     iputils-ping \
     curl \
+    libcoap3-dev \
+    tcpdump \
     && rm -rf /var/lib/apt/lists/*
 
 # Crear directorio de trabajo
@@ -36,16 +39,23 @@ RUN cd iot_apps && \
     sed -i 's|"../../coreconf_zcbor_generated/|"|g' *.c
 
 # Compilar aplicaciones IoT directamente con rutas correctas
-RUN cd iot_apps && \
-    gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated \
-        iot_server.c ../ccoreconf.a -pthread -o iot_server && \
-    gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated \
-        iot_client.c ../ccoreconf.a -pthread -o iot_client && \
-    gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated \
-        iot_test_local.c ../ccoreconf.a -pthread -o iot_test_local
+# Ubuntu 22.04 libcoap3-dev instala con sufijo de backend TLS:
+#   -lcoap-3-notls  (sin TLS, suficiente para CoAP básico UDP)
+# En macOS compilamos contra libcoap compilado desde source que sí da -lcoap-3
+RUN COAP_LIBS=$(pkg-config --libs libcoap-3-notls 2>/dev/null || echo "-lcoap-3-notls") && \
+    COAP_INC=$(pkg-config --cflags libcoap-3-notls 2>/dev/null || echo "") && \
+    echo "Usando flags: $COAP_INC $COAP_LIBS" && \
+    cd iot_apps && \
+    gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated $COAP_INC \
+        iot_server.c ../ccoreconf.a $COAP_LIBS -pthread -o iot_server && \
+    gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated $COAP_INC \
+        iot_client.c ../ccoreconf.a $COAP_LIBS -pthread -o iot_client && \
+    gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated $COAP_INC \
+        iot_test_local.c ../ccoreconf.a $COAP_LIBS -pthread -o iot_test_local
 
 # Exponer puertos
-EXPOSE 5683 8080
+# 5683/udp: CoAP usa UDP (no TCP)
+EXPOSE 5683/udp 8080
 
 # Variable de entorno para identificar el dispositivo
 ENV DEVICE_ID=unknown
