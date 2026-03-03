@@ -151,6 +151,26 @@ int insertCoreconfHashMap(CoreconfHashMapT* map, uint64_t key, CoreconfValueT* v
     return 0;
 }
 
+// Delete a SID from CoreconfHashMap. Returns 0 on success, -1 if not found.
+int deleteFromCoreconfHashMap(CoreconfHashMapT* map, uint64_t key) {
+    size_t index = hashKey((uint32_t)key);
+    CoreconfObjectT *prev = NULL;
+    CoreconfObjectT *cur  = map->table[index];
+    while (cur != NULL) {
+        if (cur->key == key) {
+            if (prev) prev->next = cur->next;
+            else       map->table[index] = cur->next;
+            freeCoreconf(cur->value, true);
+            free(cur);
+            if (map->size > 0) map->size--;
+            return 0;
+        }
+        prev = cur;
+        cur  = cur->next;
+    }
+    return -1; /* not found */
+}
+
 // Get Value from CoreconfHashMap
 CoreconfValueT* getCoreconfHashMap(CoreconfHashMapT* map, uint64_t key) {
     size_t index = hashKey((uint32_t)key);

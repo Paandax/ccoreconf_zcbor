@@ -1,91 +1,60 @@
 version: '3.8'
 
 services:
-  # Gateway/Coordinador IoT
-  iot_gateway:
+
+  # ── Gateway CORECONF unificado ──────────────────────────────────────────────
+  # Acepta: FETCH, GET, iPATCH, PUT, DELETE en /c
+  # Acceso desde host: coap://localhost:5683/c
+  coreconf_gateway:
     image: iot-coreconf
-    container_name: iot_gateway
+    container_name: coreconf_gateway
     hostname: gateway
-    environment:
-      - DEVICE_ID=gateway-001
-      - DEVICE_TYPE=gateway
     ports:
       - "5683:5683/udp"
-      - "8080:8080"
     networks:
       iot_network:
         ipv4_address: 172.20.0.10
-    command: ./iot_apps/iot_server
+    command: ./iot_apps/coreconf_server
     volumes:
       - ./logs:/iot_device/logs
+    restart: unless-stopped
 
-  # Sensor de temperatura
-  iot_sensor_temp:
+  # ── Dispositivo IoT 1 — sensor de temperatura (CLI interactivo) ─────────────
+  # Conectar: docker attach coreconf_device_1
+  # Salir sin matar el contenedor: Ctrl-P Ctrl-Q
+  coreconf_device_1:
     image: iot-coreconf
-    container_name: iot_sensor_temp
-    hostname: sensor-temp
+    container_name: coreconf_device_1
+    hostname: device-temp
+    stdin_open: true
+    tty: true
     environment:
-      - DEVICE_ID=sensor-temp-001
-      - DEVICE_TYPE=temperature_sensor
       - GATEWAY_HOST=172.20.0.10
       - GATEWAY_PORT=5683
     networks:
       iot_network:
         ipv4_address: 172.20.0.11
-    command: ./iot_apps/iot_client temperature
+    command: ./iot_apps/coreconf_cli temperature sensor-temp-001
     depends_on:
-      - iot_gateway
+      - coreconf_gateway
 
-  # Sensor de humedad
-  iot_sensor_humidity:
+  # ── Dispositivo IoT 2 — sensor de humedad (CLI interactivo) ─────────────────
+  # Conectar: docker attach coreconf_device_2
+  coreconf_device_2:
     image: iot-coreconf
-    container_name: iot_sensor_humidity
-    hostname: sensor-humidity
+    container_name: coreconf_device_2
+    hostname: device-humidity
+    stdin_open: true
+    tty: true
     environment:
-      - DEVICE_ID=sensor-humidity-001
-      - DEVICE_TYPE=humidity_sensor
       - GATEWAY_HOST=172.20.0.10
       - GATEWAY_PORT=5683
     networks:
       iot_network:
         ipv4_address: 172.20.0.12
-    command: ./iot_apps/iot_client humidity
+    command: ./iot_apps/coreconf_cli humidity sensor-hum-001
     depends_on:
-      - iot_gateway
-
-  # Actuador (LED/Relay)
-  iot_actuator:
-    image: iot-coreconf
-    container_name: iot_actuator
-    hostname: actuator
-    environment:
-      - DEVICE_ID=actuator-001
-      - DEVICE_TYPE=relay
-      - GATEWAY_HOST=172.20.0.10
-      - GATEWAY_PORT=5683
-    networks:
-      iot_network:
-        ipv4_address: 172.20.0.13
-    command: ./iot_apps/iot_client actuator
-    depends_on:
-      - iot_gateway
-
-  # Edge device (procesamiento local)
-  iot_edge:
-    image: iot-coreconf
-    container_name: iot_edge
-    hostname: edge-device
-    environment:
-      - DEVICE_ID=edge-001
-      - DEVICE_TYPE=edge_processor
-      - GATEWAY_HOST=172.20.0.10
-      - GATEWAY_PORT=5683
-    networks:
-      iot_network:
-        ipv4_address: 172.20.0.14
-    command: ./iot_apps/iot_client edge
-    depends_on:
-      - iot_gateway
+      - coreconf_gateway
 
 networks:
   iot_network:

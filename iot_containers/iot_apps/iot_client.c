@@ -337,9 +337,15 @@ static int do_fetch(coap_context_t *ctx, coap_session_t *session) {
      */
     coap_add_option(pdu, COAP_OPTION_URI_PATH, 1, (uint8_t*)"c");
 
+    // Content-Format: 141 = application/yang-identifiers+cbor-seq (RFC §2.3)
     uint8_t cf_buf[4];
-    size_t cf_len = coap_encode_var_safe(cf_buf, sizeof(cf_buf), 60);
+    size_t cf_len = coap_encode_var_safe(cf_buf, sizeof(cf_buf), 141);
     coap_add_option(pdu, COAP_OPTION_CONTENT_FORMAT, cf_len, cf_buf);
+
+    /* RFC §4.1: indicar Accept: 142 (yang-data+cbor; id=sid) para la respuesta */
+    uint8_t acc_buf[4];
+    size_t acc_len = coap_encode_var_safe(acc_buf, sizeof(acc_buf), 142);
+    coap_add_option(pdu, COAP_OPTION_ACCEPT, acc_len, acc_buf);
 
     /*
      * ========================================================================

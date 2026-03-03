@@ -51,7 +51,11 @@ RUN COAP_LIBS=$(pkg-config --libs libcoap-3-notls 2>/dev/null || echo "-lcoap-3-
     gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated $COAP_INC \
         iot_client.c ../ccoreconf.a $COAP_LIBS -pthread -o iot_client && \
     gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated $COAP_INC \
-        iot_test_local.c ../ccoreconf.a $COAP_LIBS -pthread -o iot_test_local
+        iot_test_local.c ../ccoreconf.a $COAP_LIBS -pthread -o iot_test_local && \
+    gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated $COAP_INC \
+        coreconf_server.c ../ccoreconf.a $COAP_LIBS -pthread -o coreconf_server && \
+    gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated $COAP_INC \
+        coreconf_cli.c ../ccoreconf.a $COAP_LIBS -pthread -o coreconf_cli
 
 # Exponer puertos
 # 5683/udp: CoAP usa UDP (no TCP)

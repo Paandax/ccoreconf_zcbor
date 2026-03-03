@@ -362,14 +362,14 @@ static void handle_fetch_coreconf(coap_resource_t *resource,
     // 4.1 ESCRIBE AQUÍ:
     coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
 
-    // 4.2 ESCRIBE AQUÍ:
+    // 4.2 Content-Format: 142 = application/yang-instances+cbor-seq (RFC draft-ietf-core-comi §2.3)
     uint8_t content_format_buf[4];
-    size_t content_format_len = coap_encode_var_safe(content_format_buf, sizeof(content_format_buf), 60);
+    size_t content_format_len = coap_encode_var_safe(content_format_buf, sizeof(content_format_buf), 142);
     coap_add_option(response, COAP_OPTION_CONTENT_FORMAT, content_format_len, content_format_buf);
     // 4.3 ESCRIBE AQUÍ:
     coap_add_data(response, response_len, response_buffer);
 
-    printf("   ✅ FETCH completado → 2.05 Content\n");
+    printf("   ✅ FETCH completado → 2.05 Content (CF=142 yang-instances+cbor-seq)\n");
 }
 
 /*

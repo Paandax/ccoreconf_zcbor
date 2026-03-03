@@ -22,6 +22,19 @@ examples/test_exhaustive
 iot_containers/iot_apps/iot_server
 iot_containers/iot_apps/iot_client
 iot_containers/iot_apps/iot_test_local
+iot_containers/iot_apps/coreconf_server
+iot_containers/iot_apps/coreconf_cli
+iot_containers/iot_apps/get_server
+iot_containers/iot_apps/get_client
+iot_containers/iot_apps/ipatch_server
+iot_containers/iot_apps/ipatch_client
+iot_containers/iot_apps/put_server
+iot_containers/iot_apps/put_client
+iot_containers/iot_apps/delete_server
+iot_containers/iot_apps/delete_client
+examples/test_fetch
+examples/test_fetch_with_keys
+examples/test_migration
 
 # Logs
 *.log
