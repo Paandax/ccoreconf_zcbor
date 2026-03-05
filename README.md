@@ -1,1038 +1,239 @@
-# CORECONF con zcbor - Migración y Prueba de Concepto IoT 🚀
+# ccoreconf_zcbor — Implementación de CORECONF (RFC 9254)
 
-[![C11](https://img.shields.io/badge/standard-C11-blue.svg)](https://en.wikipedia.org/wiki/C11_%28C_standard_revision%29)
-[![CBOR](https://img.shields.io/badge/format-CBOR-green.svg)](https://cbor.io/)
-[![Tests](https://img.shields.io/badge/tests-57%2F57%20passed-success.svg)]()
-[![RFC 9254](https://img.shields.io/badge/RFC%209254-100%25%20compliant-brightgreen.svg)](https://www.rfc-editor.org/rfc/rfc9254.html)
+Este repositorio es parte de mi TFG. El objetivo es implementar el protocolo **CORECONF** (RFC 9254) para gestión de dispositivos IoT usando CoAP como transporte y CBOR como formato de serialización.
 
-> Implementación de **CORECONF** (YANG-based Configuration Protocol) usando **zcbor** para codificación/decodificación CBOR en sistemas IoT embebidos.
+La idea es que en redes IoT no puedes usar HTTP+JSON como en internet normal porque los dispositivos tienen poca RAM, baterías limitadas y las redes son poco fiables. CORECONF resuelve esto usando CoAP (un HTTP ligero sobre UDP) y CBOR (un JSON binario mucho más compacto).
 
 ---
 
-## 📋 Tabla de Contenidos
+## ¿Qué he implementado?
 
-1. [Descripción General](#-descripción-general)
-2. [Migración nanoCBOR → zcbor](#-migración-nanocbor--zcbor)
-3. [Instalación y Compilación](#-instalación-y-compilación)
-4. [Uso y API](#-uso-y-api)
-5. [Ejemplos y Tests](#-ejemplos-y-tests)
-6. [Pruebas IoT](#-pruebas-iot)
-7. [Estructura del Proyecto](#-estructura-del-proyecto)
-8. [Resultados y Métricas](#-resultados-y-métricas)
-9. [Implementación RFC 9254 FETCH Completa](#-implementación-rfc-9254-fetch-completa-febrero-2026)
-10. [Referencias](#-referencias)
+Las 5 operaciones CORECONF del RFC más un POST de registro, todas verificadas con Wireshark:
 
----
+| Operación | Método CoAP | CF entrada | CF salida | Código respuesta |
+|-----------|------------|-----------|----------|-----------------|
+| Registrar dispositivo | POST | 60 | — | 2.04 Changed |
+| Leer datastore completo | GET | — | 142 | 2.05 Content |
+| Leer SIDs específicos | FETCH | 141 | 142 | 2.05 Content |
+| Modificar SIDs concretos | iPATCH | 141 | — | 2.04 Changed |
+| Reemplazar datastore | PUT | 142 | — | 2.04 Changed |
+| Borrar SIDs o datastore | DELETE | — | — | 2.02 Deleted |
 
-## 🎯 Descripción General
+Los Content-Format 141 y 142 son los definidos en el RFC para `application/yang-patch+cbor` y `application/yang-data+cbor` respectivamente. El servidor valida el CF de cada petición y devuelve 4.15 si es incorrecto.
 
-Este proyecto es un **Trabajo de Fin de Grado (TFG)** que implementa el protocolo **CORECONF** para gestión de configuración en dispositivos IoT con recursos limitados. 
+### Diferencia entre FETCH y GET
 
-### ¿Qué es CORECONF?
+Con GET recibes todo el datastore. Con FETCH mandas en el body un array CBOR con los SIDs que quieres y recibes solo esos. Si un dispositivo tiene 100 SIDs y solo necesitas 2, FETCH ahorra mucho ancho de banda.
 
-**CORECONF** (Configuration Management with YANG) es un protocolo ligero que utiliza:
+### Diferencia entre iPATCH y PUT
 
-- **CBOR**: Formato binario ultra-compacto (~42% más pequeño que JSON)
-- **SIDs**: Identificadores numéricos que reemplazan las claves YANG textuales
-- **YANG**: Lenguaje de modelado de datos para redes
-
-### ✨ Características Principales
-
-- ✅ **Migración completa** de nanoCBOR → zcbor (100% funcional)
-- ✅ **57 tests exhaustivos** pasando (cobertura total de tipos y operaciones)
-- ✅ **RFC 9254 100% compliant**: Instance-identifiers con búsqueda semántica
-- ✅ **Operaciones CORECONF**:
-  - `STORE`: Almacenar configuración/datos en gateway
-  - `FETCH`: Recuperar valores específicos por SID
-  - `FETCH con keys`: Búsqueda semántica en arrays `[SID, "key"]`
-  - `EXAMINE`: Listar SIDs disponibles
-- ✅ **Cliente-Servidor IoT**:
-  - Comunicación CBOR sobre TCP/IP (puerto 5683)
-  - Gateway centralizado + múltiples sensores/actuadores
-  - Soporte para fork() multi-cliente
-- ✅ **Eficiencia**:
-  - 58 bytes CBOR vs ~100 bytes JSON (41.8% reducción)
-  - Encoding/decoding < 1ms
-  - Uso de memoria < 2KB stack
-- ✅ **Soporte Docker** para despliegue en contenedores
-
-### 🎉 Resultados de Validación
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TEST SUITE                    RESULTADO      COBERTURA
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Test Básico Migración         3/3  ✅       Encode/Decode/Roundtrip
-Test FETCH Simple             7/7  ✅       Query por SID
-Test FETCH con Keys (RFC)     7/7  ✅       Instance-identifiers completos
-Test Exhaustivo               40/40 ✅      Todos los tipos de datos
-Test Cliente-Servidor IoT     OK   ✅       STORE + FETCH real
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TOTAL                         57/57 ✅      100% SUCCESS RATE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
+iPATCH modifica solo los SIDs que le mandas, el resto no se toca. PUT reemplaza el datastore completo: lo que no aparezca en el body desaparece.
 
 ---
 
-## 🔄 Migración nanoCBOR → zcbor
-
-### Motivación del Cambio
-
-| Aspecto | nanoCBOR | zcbor |
-|---------|----------|-------|
-| **Mantenimiento** | Limitado | Activo (Nordic Semiconductor) |
-| **Features** | Básicas | Avanzadas (tags, validación) |
-| **Documentación** | Mínima | Completa |
-| **Tooling** | Manual | Generación automática desde CDDL |
-| **Soporte** | Comunidad pequeña | Empresa + comunidad |
-
-### Cambios Técnicos Principales
-
-#### 1. Estados de Encoder/Decoder
-
-**Antes (nanoCBOR)**:
-```c
-nanocbor_encoder_t encoder;
-nanocbor_encoder_init(&encoder, buffer, sizeof(buffer));
-```
-
-**Después (zcbor)**:
-```c
-zcbor_state_t states[5];  // Stack de estados (profundidad máxima)
-zcbor_new_encode_state(states, 5, buffer, sizeof(buffer), 0);
-```
-
-#### 2. Encode de Mapa CBOR
-
-**Antes (nanoCBOR)**:
-```c
-nanocbor_fmt_map(&encoder, num_pairs);
-nanocbor_fmt_uint(&encoder, key);
-nanocbor_fmt_int(&encoder, value);
-```
-
-**Después (zcbor)**:
-```c
-zcbor_map_start_encode(states, num_pairs);
-zcbor_uint64_put(states, key);
-zcbor_int64_put(states, value);
-zcbor_map_end_encode(states, num_pairs);
-```
-
-#### 3. Acceso al Buffer Codificado
-
-**Antes (nanoCBOR)**:
-```c
-size_t len = nanocbor_encoded_len(&encoder);
-// O: encoder.cur - buffer
-```
-
-**Después (zcbor)**:
-```c
-size_t len = states[0].payload - buffer;
-```
-
-### Archivos Modificados
-
-| Archivo | Líneas | Cambios | Estado |
-|---------|--------|---------|--------|
-| `src/serialization.c` | 302 | Reescrito completo con API zcbor | ✅ |
-| `include/serialization.h` | 45 | Actualización de firmas | ✅ |
-| `Makefile` | 80 | Eliminado nanoCBOR, añadido zcbor sources | ✅ |
-| `src/coreconfTypes.c` | 250 | Sin cambios (independiente) | ✅ |
-| `src/hashmap.c` | 180 | Sin cambios (independiente) | ✅ |
-| `src/sid.c` | 120 | Sin cambios (independiente) | ✅ |
-
-**Resultado final**: Librería `ccoreconf.a` (114 KB) compilada sin errores ni warnings.
-
----
-
-## 📦 Instalación y Compilación
-
-### Requisitos del Sistema
-
-- **SO**: Linux (Ubuntu 20.04+), macOS (10.15+)
-- **Compilador**: GCC 9.0+ con soporte C11
-- **Make**: GNU Make 4.0+
-- **Docker** (opcional): Para pruebas con contenedores
-
-### Clonar el Repositorio
-
-```bash
-git clone https://github.com/Paandax/ccoreconf_zcbor.git
-cd ccoreconf_zcbor
-```
-
-### Compilación de la Librería
-
-```bash
-make clean
-make
-```
-
-**Salida esperada**:
-```
-gcc -c src/serialization.c -o obj/serialization.o
-gcc -c src/coreconfTypes.c -o obj/coreconfTypes.o
-gcc -c src/hashmap.c -o obj/hashmap.o
-...
-ar rcs ccoreconf.a obj/*.o
-✅ ccoreconf.a creado (114 KB)
-```
-
-### Compilación de Tests
-
-```bash
-cd examples
-make
-```
-
-**Ejecutables generados**:
-- `test_zcbor_migration` (tests básicos)
-- `test_fetch_simple` (demo FETCH)
-- `test_exhaustive` (40 tests completos)
-
-### Compilación de Aplicaciones IoT
-
-```bash
-cd iot_containers/iot_apps
-make
-```
-
-**Ejecutables**:
-- `iot_server` (Gateway)
-- `iot_client` (Sensor/Actuador)
-- `iot_test_local` (Tests sin red)
-
----
-
-## 🔧 Uso y API
-
-### API Principal de CORECONF
-
-#### 1. Crear y Manipular Estructuras
-
-```c
-#include "coreconfTypes.h"
-#include "serialization.h"
-
-// Crear hashmap
-CoreconfValueT *data = createCoreconfHashmap();
-CoreconfHashMapT *map = data->data.map_value;
-
-// Insertar valores con SIDs
-insertCoreconfHashMap(map, 1, createCoreconfString("device-001"));
-insertCoreconfHashMap(map, 10, createCoreconfString("temperature"));
-insertCoreconfHashMap(map, 20, createCoreconfReal(23.5));
-insertCoreconfHashMap(map, 21, createCoreconfString("celsius"));
-```
-
-#### 2. Serializar a CBOR
-
-```c
-#include "zcbor_encode.h"
-
-uint8_t buffer[256];
-zcbor_state_t states[5];
-
-// Inicializar encoder
-zcbor_new_encode_state(states, 5, buffer, sizeof(buffer), 0);
-
-// Encodificar
-if (coreconfToCBOR(data, states)) {
-    size_t cbor_len = states[0].payload - buffer;
-    printf("CBOR generado: %zu bytes\n", cbor_len);
-    
-    // Transmitir por socket/serial/etc
-    send(socket_fd, buffer, cbor_len, 0);
-}
-```
-
-#### 3. Deserializar desde CBOR
-
-```c
-#include "zcbor_decode.h"
-
-uint8_t received[256];
-ssize_t len = recv(socket_fd, received, sizeof(received), 0);
-
-// Inicializar decoder
-zcbor_state_t dec_states[5];
-zcbor_new_decode_state(dec_states, 5, received, len, 1, NULL, 0);
-
-// Decodificar
-CoreconfValueT *decoded = cborToCoreconfValue(dec_states, 0);
-
-if (decoded && decoded->type == CORECONF_HASHMAP) {
-    CoreconfHashMapT *map = decoded->data.map_value;
-    
-    // Acceder a valores por SID
-    CoreconfValueT *temp = getCoreconfHashMap(map, 20);
-    if (temp && temp->type == CORECONF_REAL) {
-        printf("Temperatura: %.2f °C\n", temp->data.real_value);
-    }
-}
-```
-
-#### 4. Operación FETCH
-
-```c
-// Buscar valor específico por SID
-CoreconfValueT *result = getCoreconfHashMap(map, target_sid);
-
-if (result) {
-    switch (result->type) {
-        case CORECONF_REAL:
-            printf("Valor: %.2f\n", result->data.real_value);
-            break;
-        case CORECONF_STRING:
-            printf("Valor: %s\n", result->data.string_value);
-            break;
-        case CORECONF_UINT_64:
-            printf("Valor: %lu\n", result->data.u64);
-            break;
-    }
-}
-```
-
-### Tipos de Datos Soportados
-
-| Tipo CORECONF | Tipo C | Función de Creación |
-|---------------|--------|---------------------|
-| `CORECONF_INT_8` | `int8_t` | `createCoreconfInt8(value)` |
-| `CORECONF_INT_16` | `int16_t` | `createCoreconfInt16(value)` |
-| `CORECONF_INT_32` | `int32_t` | `createCoreconfInt32(value)` |
-| `CORECONF_INT_64` | `int64_t` | `createCoreconfInt64(value)` |
-| `CORECONF_UINT_8` | `uint8_t` | `createCoreconfUint8(value)` |
-| `CORECONF_UINT_16` | `uint16_t` | `createCoreconfUint16(value)` |
-| `CORECONF_UINT_32` | `uint32_t` | `createCoreconfUint32(value)` |
-| `CORECONF_UINT_64` | `uint64_t` | `createCoreconfUint64(value)` |
-| `CORECONF_REAL` | `double` | `createCoreconfReal(value)` |
-| `CORECONF_STRING` | `char*` | `createCoreconfString(value)` |
-| `CORECONF_TRUE` | - | `createCoreconfBoolean(true)` |
-| `CORECONF_FALSE` | - | `createCoreconfBoolean(false)` |
-| `CORECONF_HASHMAP` | - | `createCoreconfHashmap()` |
-| `CORECONF_ARRAY` | - | `createCoreconfArray()` |
-
----
-
-## 📚 Ejemplos y Tests
-
-### 1. Test Básico de Migración
-
-**Archivo**: [`examples/test_zcbor_migration.c`](examples/test_zcbor_migration.c)
-
-```bash
-cd examples
-./test_zcbor_migration
-```
-
-**Salida**:
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TEST 1: Encode básico CBOR
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ CBOR generado: 15 bytes
-✅ Test 1 PASADO
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TEST 2: Decode CBOR → CORECONF
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ Decodificado correctamente
-✅ device_id = sensor-test-001
-✅ Test 2 PASADO
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TEST 3: Roundtrip completo
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ Encode y decode exitoso
-✅ Test 3 PASADO
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ RESULTADO: 3/3 tests pasados
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-### 2. Test de Operación FETCH
-
-**Archivo**: [`examples/test_fetch_simple.c`](examples/test_fetch_simple.c)
-
-```bash
-./test_fetch_simple
-```
-
-**Demuestra**:
-1. ✅ Creación de modelo CORECONF con SIDs 1536-1539
-2. ✅ Serialización completa a CBOR (42 bytes)
-3. ✅ Deserialización y validación
-4. ✅ FETCH de subtree (SID 1537) → 27 bytes
-5. ✅ Comparación de tamaños (ahorro de 35.7%)
-
-### 3. Test Exhaustivo
-
-**Archivo**: [`examples/test_exhaustive.c`](examples/test_exhaustive.c)
-
-```bash
-./test_exhaustive
-```
-
-**Cobertura**:
-- ✅ 8 tests de enteros con signo (int8, int16, int32, int64)
-- ✅ 8 tests de enteros sin signo (uint8, uint16, uint32, uint64)
-- ✅ 4 tests de reales (doubles positivos, negativos, cero, decimales)
-- ✅ 4 tests de booleanos (true, false, mixed)
-- ✅ 4 tests de strings (simple, vacío, UTF-8, especiales)
-- ✅ 6 tests de estructuras complejas (arrays anidados, hashmaps profundos)
-- ✅ 6 tests de edge cases (contenedores vacíos, valores máximos, overflow)
-
-**Total: 40 tests, 100% éxito**
-
-### 4. Script de Ejecución Completa
-
-```bash
-cd examples
-./run_all_tests.sh
-```
-
-**Salida**:
-```
-╔══════════════════════════════════════════════════════════════════╗
-║                                                                  ║
-║  📋 EJECUTANDO SUITE DE TESTS CORECONF/ZCBOR                    ║
-║                                                                  ║
-╚══════════════════════════════════════════════════════════════════╝
-
-🔍 Test 1/3: Migración Básica
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ test_zcbor_migration: 3/3 tests PASADOS
-
-🔍 Test 2/3: FETCH Operation
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ test_fetch_simple: PASADO
-
-🔍 Test 3/3: Suite Exhaustiva
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ test_exhaustive: 40/40 tests PASADOS
-
-╔══════════════════════════════════════════════════════════════════╗
-║  ✅ RESULTADO FINAL: 50/50 tests pasados (100%)                  ║
-╚══════════════════════════════════════════════════════════════════╝
-```
-
----
-
-## 🌐 Pruebas IoT
-
-### Arquitectura Cliente-Servidor
-
-```
-┌──────────────────────┐         CBOR/TCP          ┌──────────────────────┐
-│   IoT Client         │      (Port 5683)          │   Gateway Server     │
-│   (Sensor/Actuator)  │◄─────────────────────────►│   (Coordinator)      │
-│                      │                            │                      │
-│ • Genera datos       │   1. STORE (58 bytes)     │ • Almacena datos     │
-│ • Crea mensajes CBOR │─────────────────────────► │ • Procesa requests   │
-│ • Envía STORE/FETCH  │                            │ • Responde queries   │
-│                      │◄─ 2. ACK (26 bytes) ──────│                      │
-│ • Procesa respuestas │                            │ • Gestiona múltiples │
-│                      │── 3. FETCH (22 bytes) ───►│   clientes (fork)    │
-│                      │◄─ 4. Result (30 bytes) ───│                      │
-└──────────────────────┘                            └──────────────────────┘
-       ↑                                                     ↑
-       └─────────────────── Misma conexión TCP ────────────┘
-```
-
-### Protocolo de Comunicación
-
-#### Mensaje STORE (Cliente → Servidor)
-
-```cbor
-{
-  1: "temp-sensor-001",    // device_id (SID 1)
-  2: "store",              // operation (SID 2)
-  10: "temperature",       // device_type (SID 10)
-  11: 1765234567,          // timestamp (SID 11)
-  20: 23.45,               // sensor_value (SID 20)
-  21: "celsius"            // unit (SID 21)
-}
-```
-**Tamaño CBOR**: 58 bytes
-
-#### Respuesta ACK (Servidor → Cliente)
-
-```cbor
-{
-  100: "ok",               // status (SID 100)
-  101: "temp-sensor-001",  // device_id (SID 101)
-  102: 1765234567          // timestamp (SID 102)
-}
-```
-**Tamaño CBOR**: 26 bytes
-
-#### Mensaje FETCH (Cliente → Servidor)
-
-```cbor
-{
-  1: "temp-sensor-001",    // device_id (SID 1)
-  2: "fetch",              // operation (SID 2)
-  3: 20                    // target_sid (SID 3) - pide valor SID 20
-}
-```
-**Tamaño CBOR**: 22 bytes
-
-#### Respuesta FETCH (Servidor → Cliente)
-
-```cbor
-{
-  100: "ok",               // status
-  101: "temp-sensor-001",  // device_id
-  102: 1765234567,         // timestamp
-  20: 23.45                // Valor encontrado (SID 20)
-}
-```
-**Tamaño CBOR**: ~30 bytes
-
-### Ejecutar Pruebas
-
-#### Opción 1: Dos Terminales
-
-**Terminal 1 - Servidor:**
-```bash
-cd iot_containers/iot_apps
-./iot_server
-```
-
-**Salida**:
-```
-╔═══════════════════════════════════════════════════════════╗
-║    IoT GATEWAY - CORECONF/CBOR con FETCH OPERATIONS      ║
-╚═══════════════════════════════════════════════════════════╝
-
-🔧 Gateway ID: gateway-001
-📡 Escuchando en puerto 5683
-
-✅ Servidor listo. Esperando conexiones...
-```
-
-**Terminal 2 - Cliente:**
-```bash
-cd iot_containers/iot_apps
-DEVICE_ID="mi-sensor" GATEWAY_HOST="127.0.0.1" ./iot_client temperature
-```
-
-**Salida**:
-```
-╔═══════════════════════════════════════════════════════════╗
-║     IoT CLIENT - CORECONF/CBOR con FETCH OPERATIONS      ║
-╚═══════════════════════════════════════════════════════════╝
-
-🔧 Configuración:
-   Device ID:   mi-sensor
-   Device Type: temperature
-   Gateway:     127.0.0.1:5683
-
-═══════════════════════════════════════════════════════════
-║ CICLO 1 - Thu Feb 12 10:00:00 2026
-╚═══════════════════════════════════════════════════════════
-
-🔌 Conectando a gateway 127.0.0.1:5683... ✅
-
-📤 PASO 1: Enviando datos al gateway
-   📦 CBOR (58 bytes):
-   bf 01 69 6d 69 2d 73 65 6e 73 6f 72 ...
-   ✅ Datos enviados (58 bytes)
-
-📥 PASO 2: Recibiendo respuesta
-   ✅ Respuesta recibida (26 bytes)
-   ✅ Respuesta decodificada
-
-🔍 PASO 3: FETCH - Pidiendo dato específico
-   Solicitando SID 20...
-   📦 Mensaje FETCH (22 bytes):
-   bf 01 69 6d 69 2d 73 65 6e 73 6f 72 ...
-   ✅ FETCH enviado
-   ✅ Resultado FETCH recibido (30 bytes)
-   📊 Temperatura recuperada: 23.45 °C
-
-✅ Ciclo completado exitosamente
-```
-
-#### Opción 2: Script Automático
-
-```bash
-cd iot_containers
-./test_iot.sh
-```
-
-### Tipos de Dispositivos Soportados
-
-| Tipo | SID 10 Value | SID 20 (valor) | SID 21 (unidad) |
-|------|--------------|----------------|-----------------|
-| **Temperature** | "temperature" | Real (15.0-30.0) | "celsius" |
-| **Humidity** | "humidity" | Real (30.0-90.0) | "percent" |
-| **Actuator** | "actuator" | Boolean (0/1) | - |
-| **Edge Device** | "edge" | Real (múltiples) | - |
-
-### Docker Deployment (Opcional)
-
-**Construir imagen**:
-```bash
-cd iot_containers
-docker build -t iot-coreconf .
-```
-
-**Lanzar ecosistema completo**:
-```bash
-docker-compose up
-```
-
-**Servicios**:
-- `iot_gateway` (172.20.0.10:5683)
-- `iot_sensor_temp` (172.20.0.11)
-- `iot_sensor_humidity` (172.20.0.12)
-- `iot_actuator` (172.20.0.13)
-- `iot_edge` (172.20.0.14)
-
----
-
-## 📁 Estructura del Proyecto
+## Estructura del proyecto
 
 ```
 ccoreconf_zcbor/
 │
-├── 📄 README.md                      # Este archivo
-├── 📄 Makefile                       # Build principal
-├── 📦 ccoreconf.a                    # Librería compilada (114KB)
+├── include/                  ← headers de la biblioteca
+│   ├── coreconfTypes.h       ← tipos principales: CoreconfValueT, hashmap
+│   ├── fetch.h / get.h
+│   ├── ipatch.h / put.h
+│   └── delete.h
 │
-├── 📂 include/                       # Headers públicos
-│   ├── coreconfTypes.h              # Tipos: CoreconfValueT, etc.
-│   ├── serialization.h              # API: coreconfToCBOR(), etc.
-│   ├── hashmap.h                    # HashMap implementation
-│   └── sid.h                        # Schema Item Identifiers
+├── src/                      ← implementación de la biblioteca
+│   ├── coreconfTypes.c       ← hashmap SID→valor con MurmurHash
+│   ├── serialization.c       ← conversión CoreconfValueT ↔ CBOR (usa zcbor)
+│   ├── sid.c                 ← delta encoding de SIDs
+│   ├── fetch.c / get.c
+│   ├── ipatch.c / put.c
+│   └── delete.c
 │
-├── 📂 src/                          # Implementación
-│   ├── serialization.c              # ✅ Migrado a zcbor (302 líneas)
-│   ├── coreconfTypes.c              # Gestión de tipos
-│   ├── hashmap.c                    # HashMap operations
-│   └── sid.c                        # SID mapping
+├── coreconf_zcbor_generated/ ← código generado por zcbor a partir de coreconf.cddl
 │
-├── 📂 zcbor/                        # Librería zcbor v0.9.99
-│   ├── include/
-│   │   ├── zcbor_common.h
-│   │   ├── zcbor_encode.h
-│   │   └── zcbor_decode.h
-│   └── src/
-│       ├── zcbor_common.c
-│       ├── zcbor_encode.c
-│       └── zcbor_decode.c
+├── examples/                 ← tests de la biblioteca
 │
-├── 📂 examples/                     # Tests y demostraciones
-│   ├── test_zcbor_migration.c       # 3 tests básicos ✅
-│   ├── test_fetch_simple.c          # Demo FETCH completo ✅
-│   ├── test_exhaustive.c            # 40 tests exhaustivos ✅
-│   ├── Makefile
-│   └── run_all_tests.sh             # Script ejecutor
+├── iot_containers/           ← despliegue Docker
+│   ├── Dockerfile
+│   ├── docker-compose.yml    ← gateway + 2 sensores IoT
+│   └── iot_apps/
+│       ├── coreconf_server.c ← servidor CoAP unificado (todos los métodos sobre /c)
+│       ├── coreconf_cli.c    ← cliente interactivo tipo REPL
+│       └── [get|ipatch|put|delete]_[server|client].c
 │
-├── 📂 iot_containers/               # Pruebas IoT
-│   ├── 🐳 Dockerfile                # Ubuntu 22.04 + ccoreconf
-│   ├── 🐳 docker-compose.yml        # 5 servicios
-│   ├── 📄 README.md                 # Doc IoT
-│   ├── 🔧 test_iot.sh               # Script de prueba
-│   └── 📂 iot_apps/
-│       ├── iot_server.c             # Gateway (210 líneas)
-│       ├── iot_client.c             # IoT device (260 líneas)
-│       ├── iot_test_local.c         # Tests sin red
-│       └── Makefile
-│
-└── 📂 docs/                         # Documentación adicional
-    ├── MIGRACION_COMPLETA.md        # Detalles técnicos
-    ├── GUIA_NANOCBOR_CORECONF.md    # Guía histórica
-    └── README_ZCBOR_FUNCIONES.md    # API zcbor
+└── docs/                     ← documentación técnica detallada
 ```
 
----
+### Estructura de datos interna
 
-## 📊 Resultados y Métricas
+Los datos de cada dispositivo se guardan en un hashmap que mapea SIDs (enteros de 64 bits) a valores tipados:
 
-### Métricas de Compilación
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-COMPONENTE                TAMAÑO      WARNINGS   ERRORES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ccoreconf.a               114 KB      0          0
-iot_server                93 KB       0          0
-iot_client                97 KB       0          0
-test_exhaustive           105 KB      0          0
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TOTAL                     409 KB      0          0
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-### Comparación de Formatos
-
-#### Ejemplo: Datos de Sensor de Temperatura
-
-**JSON (formato tradicional)**:
-```json
-{
-  "device_id": "temp-sensor-001",
-  "operation": "store",
-  "device_type": "temperature",
-  "timestamp": 1765234567,
-  "sensor_value": 23.45,
-  "unit": "celsius"
-}
-```
-**Tamaño**: ~100 bytes (con whitespace ~130 bytes)
-
-**CBOR (con SIDs numéricos)**:
-```
-bf 01 6f 74 65 6d 70 2d 73 65 6e 73 6f 72 2d 30 
-30 31 02 65 73 74 6f 72 65 0a 6b 74 65 6d 70 65 
-72 61 74 75 72 65 0b 1a 69 3f 8b 37 14 fb 40 37 
-73 33 33 33 33 33 15 67 63 65 6c 73 69 75 73 ff
-```
-**Tamaño**: 58 bytes
-
-**AHORRO**: 42 bytes (42% reducción) 🎉
-
-#### Comparación de Operaciones
-
-| Operación | JSON | CBOR | Ahorro |
-|-----------|------|------|--------|
-| STORE completo | ~100 bytes | 58 bytes | 42% |
-| ACK | ~50 bytes | 26 bytes | 48% |
-| FETCH query | ~45 bytes | 22 bytes | 51% |
-| FETCH response | ~60 bytes | 30 bytes | 50% |
-
-### Rendimiento
-
-| Métrica | Valor Medido |
-|---------|--------------|
-| **Encoding** | < 1 ms |
-| **Decoding** | < 1 ms |
-| **Memoria (stack)** | ~2 KB |
-| **Memoria (heap)** | Variable (depende del modelo) |
-| **Latencia red** | < 1 ms (localhost) |
-| **Throughput** | > 1000 msg/s |
-
-### Cobertura de Tests
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CATEGORÍA                    TESTS     RESULTADO
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Enteros con signo            8         ✅ 100%
-Enteros sin signo            8         ✅ 100%
-Reales (doubles)             4         ✅ 100%
-Booleanos                    4         ✅ 100%
-Strings                      4         ✅ 100%
-Estructuras complejas        6         ✅ 100%
-Edge cases                   6         ✅ 100%
-Operaciones FETCH            7         ✅ 100%
-FETCH RFC 9254 (con keys)    7         ✅ 100%
-IoT Cliente-Servidor         3         ✅ 100%
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TOTAL                        57        ✅ 100%
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
----
-
-## 🛠️ Tecnologías Utilizadas
-
-| Componente | Versión | Descripción |
-|------------|---------|-------------|
-| **C Standard** | C11 | Compilación estricta con `-std=c11 -pedantic -Werror` |
-| **zcbor** | 0.9.99 | CBOR codec de Nordic Semiconductor |
-| **CBOR** | RFC 8949 | Concise Binary Object Representation |
-| **CORECONF** | draft-ietf-core-comi-17 | YANG-based configuration protocol |
-| **YANG** | RFC 7950 | Data modeling language |
-| **GCC** | 9.0+ | Compilador GNU con warnings estrictos |
-| **Make** | 4.0+ | Sistema de build |
-| **Docker** | 20.0+ | Containerización (opcional) |
-
----
-
-## ⭐ Implementación RFC 9254 FETCH Completa (Febrero 2026)
-
-### 🎯 Objetivo
-
-Implementar **100% compliant** con RFC 9254 Section 3.1.3 (FETCH Operation) incluyendo soporte para **instance-identifiers con keys** para búsqueda semántica en arrays.
-
-### 🔑 Características Implementadas
-
-#### 1. Instance-Identifiers Completos
-
-Soporte para los 3 tipos de identificadores según RFC 9254:
-
-| Tipo | Formato | Ejemplo | Descripción |
-|------|---------|---------|-------------|
-| `IID_SIMPLE` | `SID` | `20` | Acceso directo por SID |
-| `IID_WITH_STR_KEY` | `[SID, "key"]` | `[1533, "eth0"]` | Búsqueda por string en array |
-| `IID_WITH_INT_KEY` | `[SID, index]` | `[30, 2]` | Acceso por índice en array |
-
-#### 2. Búsqueda Semántica
-
-**Implementación clave**: `fetch_value_by_iid()` en `src/fetch.c`
-
-Realiza búsqueda semántica real:
 ```c
-// Ejemplo: [1533, "eth0"] 
-// NO solo decodifica el wire format
-// BUSCA en el array y retorna el elemento específico
-
-// Datos del dispositivo:
-{1533: [
-  {name: "eth0", status: "up", ip: "192.168.1.1"},
-  {name: "wlan0", status: "down", ip: "10.0.0.1"}
-]}
-
-// Query: [1533, "eth0"]
-// Resultado: {name: "eth0", status: "up", ip: "192.168.1.1"}
-```
-
-**Algoritmo de búsqueda**:
-1. Obtener array en el SID base
-2. Iterar por cada elemento del array
-3. Si el elemento es un hashmap, buscar en todos sus campos
-4. Si algún campo string coincide con la key → retornar ese elemento
-5. Si no se encuentra → retornar NULL
-
-#### 3. Módulos Añadidos a la Librería
-
-Se crearon dos nuevos módulos integrados en `ccoreconf.a`:
-
-**`include/fetch.h`** (API pública):
-```c
-// Tipos
-typedef enum {
-    IID_SIMPLE, IID_WITH_STR_KEY, IID_WITH_INT_KEY
-} InstanceIdentifierType;
-
-typedef struct {
-    InstanceIdentifierType type;
-    uint64_t sid;
+// Un valor puede ser int, float, string, bool, otro mapa...
+typedef struct CoreconfValue {
+    coreconf_type type;
     union {
-        char *str_key;    // Para búsqueda por string
-        int64_t int_key;  // Para acceso por índice
-    } key;
-} InstanceIdentifier;
+        double   real_value;
+        int64_t  i64;
+        char    *string_value;
+        struct CoreconfHashMap *map_value;
+        // ...
+    } data;
+} CoreconfValueT;
 
-// Funciones principales
-size_t create_fetch_request_with_iids(...);
-size_t create_fetch_response_iids(...);
-CoreconfValueT* fetch_value_by_iid(...);       // ⭐ Búsqueda semántica
-bool parse_fetch_request_iids(...);
-void free_instance_identifiers(...);
+// Hashmap con 100 buckets y encadenamiento (MurmurHash)
+typedef struct CoreconfHashMap {
+    CoreconfObjectT *table[HASHMAP_TABLE_SIZE];
+    size_t size;
+} CoreconfHashMapT;
 ```
 
-**`src/fetch.c`** (423 líneas):
-- Encoding de instance-identifiers a CBOR
-- Decoding de CBOR a instance-identifiers
-- Resolución semántica con claves
-- Gestión de memoria (malloc/free para strings)
+Uso MurmurHash en vez de `key % 100` para que cuando tenga SIDs reales de la IANA (que pueden ser números como 59998, 60000...) no haya colisiones masivas en los mismos buckets.
 
-### 📊 Validación Completa
+---
 
-#### Test: `examples/test_fetch_with_keys.c`
+## SIDs que uso (Provisionales)
 
-Prueba exhaustiva con 7 test cases:
+Son SIDs didácticos que creé para el proyecto, no están asignados por la IANA:
 
-```
-Test 1: SID simple (20)               → Valor directo: 25.5 ✅
-Test 2: SID de array (30)             → Array completo [3 elem] ✅
-Test 3: [30, "temp1"]                 → Búsqueda semántica exitosa ✅
-Test 4: [30, "hum1"]                  → Segunda búsqueda exitosa ✅
-Test 5: [30, "noexiste"]              → NULL (no encontrado) ✅
-Test 6: [30, 1]                       → Acceso por índice (elem 1) ✅
-Test 7: [30, 99]                      → NULL (fuera de límites) ✅
+| SID | Significado | Tipo |
+|-----|-------------|------|
+| 10 | nombre del sensor | string |
+| 11 | timestamp Unix | uint64 |
+| 20 | valor de medición | real |
+| 21 | unidad | string |
 
-CBOR sequence generada: 74 bytes
-Resultado: ✅ IMPLEMENTACIÓN RFC 9254 3.1.3 AL 100%
-```
+En CBOR los mapas usan **delta encoding**: en vez de mandar el SID completo cada vez, se manda la diferencia respecto al SID anterior. `{10: ..., 11: ..., 20: ..., 21: ...}` se codifica con deltas `{10, +1, +9, +1}`, lo que ahorra bytes.
 
-#### Aplicaciones IoT Actualizadas
+---
 
-**`iot_containers/iot_apps/iot_client.c`**:
-- Eliminado código local de FETCH (antes ~50 líneas)
-- Ahora usa `create_fetch_request_with_iids()` de la librería
-- Envía peticiones con keys: `[10, "temperature"]`
+## Cómo compilar
 
-**`iot_containers/iot_apps/iot_server.c`**:
-- Eliminado código manual de parsing
-- Usa `parse_fetch_request_iids()` para decodificar
-- Usa `create_fetch_response_iids()` con resolución semántica
-- Procesa correctamente `[SID, key]` haciendo búsqueda real
-
-### 🐳 Docker Validation
-
-Contenedores reconstruidos con la nueva implementación:
+### macOS
 
 ```bash
+# Primero compilar libcoap desde source (solo una vez)
+cd libcoap
+./autogen.sh && ./configure --disable-dtls && make && sudo make install
+
+# Compilar la biblioteca
+cd ccoreconf_zcbor
+make
+
+# Compilar las apps IoT
+cd iot_containers/iot_apps
+make all
+```
+
+### Ubuntu
+
+```bash
+sudo apt install libcoap3-dev build-essential
+make
+cd iot_containers/iot_apps && make all
+```
+
+---
+
+## Cómo probarlo
+
+### Opción 1 — local (dos terminales)
+
+```bash
+# Terminal 1
+cd iot_containers/iot_apps
+./coreconf_server
+
+# Terminal 2
+./coreconf_cli temperature sensor-test-001
+```
+
+Dentro del prompt `sensor-test-001>` puedes escribir:
+
+```
+store temperature 24.5   → POST, registra el dispositivo
+get                       → GET, devuelve todo el datastore
+fetch 20                  → FETCH, solo el SID 20
+ipatch 20 99.9            → iPATCH, modifica el SID 20
+put 20 55.0 21 70         → PUT, reemplaza el datastore completo
+delete 20                 → DELETE, borra solo el SID 20
+delete                    → DELETE, borra todo el datastore
+quit
+```
+
+### Opción 2 — Docker (recomendado para ver dos dispositivos a la vez) (Simulación en RED)
+
+```bash
+# Construir imagen (desde el root del proyecto)
+docker build -t iot-coreconf -f iot_containers/Dockerfile .
+
+# Levantar gateway + device_1 (temperatura) + device_2 (humedad)
 cd iot_containers
-docker-compose build    # Reconstruye con librería actualizada
-docker-compose up       # 5 contenedores (1 gateway + 4 devices)
+docker compose up -d
+
+# Conectarse a cada dispositivo en terminales separadas
+docker attach coreconf_device_1   # sensor-temp-001
+docker attach coreconf_device_2   # sensor-hum-001
 ```
 
-**Verificado**:
-- ✅ Gateway escucha en puerto 5683
-- ✅ Sensores se conectan y envían STORE
-- ✅ Cliente envía FETCH con `[SID, key]`
-- ✅ Servidor parsea y responde correctamente
-- ✅ Búsqueda semántica funciona en tiempo real
+Salir sin matar el contenedor: **Ctrl-P Ctrl-Q**
 
-### 📚 Documentación Generada
+### Ver tráfico en Wireshark
 
-Se crearon dos guías completas:
-
-1. **`FETCH_IMPLEMENTATION_GUIDE.md`** (1200+ líneas):
-   - Explicación conceptual de FETCH
-   - Arquitectura de integración en librería
-   - ¿Cómo los contenedores usan la librería?
-   - Análisis línea por línea de `fetch.h` y `fetch.c`
-   - Casos de uso prácticos
-   - Tutorial estilo TFG
-
-2. **`FETCH_FUNCTIONS_EXPLAINED.md`** (600+ líneas):
-   - Análisis técnico de cada función
-   - Algoritmos y complejidad
-   - Gestión de memoria
-   - Estrategias de parsing (two-pass)
-   - Debugging tips
-   - Conceptos clave para TFG
-
-### 🔬 Diferencia con Implementaciones Básicas
-
-| Aspecto | Implementación Básica ❌ | Nuestra Implementación ✅ |
-|---------|-------------------------|--------------------------|
-| **Parsing** | Solo decodifica wire format | Decodifica + valida tipos |
-| **Semántica** | Ignora las keys | Busca activamente en arrays |
-| **[SID, "key"]** | Retorna array completo | Retorna elemento específico |
-| **Búsqueda** | Lookup directo por SID | Itera y compara strings |
-| **RFC 9254** | Parcial | 100% compliant |
-
-### 💡 Ejemplo Real de Uso
-
-**Escenario**: Router con múltiples interfaces de red
-
-```c
-// Cliente (sensor/edge device)
-InstanceIdentifier iids[] = {
-    {IID_SIMPLE, 20, {.str_key = NULL}},           // Temperatura CPU
-    {IID_WITH_STR_KEY, 1533, {.str_key = "eth0"}}, // Interfaz Ethernet
-    {IID_WITH_STR_KEY, 1533, {.str_key = "wlan0"}} // Interfaz WiFi
-};
-
-uint8_t buffer[512];
-size_t len = create_fetch_request_with_iids(buffer, 512, iids, 3);
-send(gateway_socket, buffer, len, 0);
-
-// Servidor (gateway)
-InstanceIdentifier *parsed_iids = NULL;
-size_t count = 0;
-parse_fetch_request_iids(buffer, len, &parsed_iids, &count);
-
-// Para cada IID, buscar el valor
-for (size_t i = 0; i < count; i++) {
-    CoreconfValueT *value = fetch_value_by_iid(device_data, &parsed_iids[i]);
-    // value contiene:
-    //   - 25.5 (temperatura)
-    //   - {name:"eth0", status:"up", ip:"192.168.1.1"}
-    //   - {name:"wlan0", status:"down", ip:null}
-}
-
-// Generar respuesta CBOR sequence
-create_fetch_response_iids(response, 1024, device_data, parsed_iids, count);
-free_instance_identifiers(parsed_iids, count);
+Desde Ubuntu puedo capturar directamente en la interfaz bridge de Docker:
+```bash
+sudo tcpdump -i br+ -w captura.pcap port 5683
 ```
 
-### 🎓 Impacto en el Proyecto
+Desde macOS, pipe de tcpdump al Wireshark:
+```bash
+docker exec coreconf_gateway tcpdump -i any -w - port 5683 2>/dev/null \
+  | /Applications/Wireshark.app/Contents/MacOS/Wireshark -k -i -
+```
 
-**Antes de esta implementación**:
-- FETCH solo en código de ejemplo (`examples/`)
-- Sin soporte para `[SID, key]`
-- Librería `ccoreconf.a` incompleta
-- No instalable en dispositivos IoT reales
-
-**Después**:
-- ✅ FETCH integrado en `ccoreconf.a`
-- ✅ 100% RFC 9254 Section 3.1.3
-- ✅ Búsqueda semántica funcional
-- ✅ Librería lista para producción
-- ✅ Validado en contenedores Docker
-- ✅ Documentación completa
-
-### 📈 Estadísticas de Código
-
-| Métrica | Valor |
-|---------|-------|
-| **Nuevo código** | ~850 líneas (fetch.c + fetch.h) |
-| **Código refactorizado** | ~150 líneas (iot_client.c + iot_server.c) |
-| **Tests añadidos** | 7 tests RFC compliance |
-| **Documentación** | 1800+ líneas (2 guías MD) |
-| **Compilación** | 0 warnings, 0 errores |
-| **Tests pasando** | 50/50 (incluye nuevos) ✅ |
+Filtro en Wireshark: `coap`
 
 ---
 
-## 📖 Referencias
+## Cumplimiento RFC 9254
 
-### Estándares y RFCs
+Lo que sí cumple:
 
-- [RFC 8949 - CBOR](https://www.rfc-editor.org/rfc/rfc8949.html): Concise Binary Object Representation
-- [RFC 7950 - YANG](https://www.rfc-editor.org/rfc/rfc7950.html): Data Modeling Language
-- [draft-ietf-core-comi-17](https://datatracker.ietf.org/doc/html/draft-ietf-core-comi-17): CORECONF Management Protocol
-- [RFC 8791 - YANG Schema Item iDentifier (YANG SID)](https://www.rfc-editor.org/rfc/rfc9254.html)
+- Content-Format 141/142 en todas las operaciones
+- Validación de CF entrante con 4.15 si es incorrecto
+- Accept: 142 en FETCH
+- Códigos de respuesta correctos (2.01/2.02/2.04/2.05/4.04/4.15)
+- Block-wise transfer en GET para respuestas grandes (RFC 7959)
+- Delta encoding de SIDs en mapas CBOR
 
-### Herramientas
+Lo que queda para trabajo futuro:
 
-- [zcbor - GitHub](https://github.com/NordicSemiconductor/zcbor): Nordic Semiconductor CBOR library
-- [CBOR.me](https://cbor.me/): Online CBOR decoder/encoder
-- [YANG Catalog](https://www.yangcatalog.org/): Repository of YANG modules
-
-### Documentos del Proyecto
-
-- [`docs/MIGRACION_COMPLETA.md`](docs/MIGRACION_COMPLETA.md): Detalles técnicos de la migración
-- [`docs/GUIA_NANOCBOR_CORECONF.md`](docs/GUIA_NANOCBOR_CORECONF.md): Documentación de nanoCBOR original
-- [`docs/README_ZCBOR_FUNCIONES.md`](docs/README_ZCBOR_FUNCIONES.md): Referencia de API zcbor
-- [`iot_containers/README.md`](iot_containers/README.md): Guía de pruebas IoT
-- **[`FETCH_IMPLEMENTATION_GUIDE.md`](FETCH_IMPLEMENTATION_GUIDE.md)**: 📘 Tutorial completo FETCH RFC 9254 (nuevo)
-  - Arquitectura de integración en librería
-  - Análisis detallado de `fetch.h` y `fetch.c`
-  - Flujo completo de operaciones FETCH
-  - Casos de uso prácticos para TFG
-- **[`FETCH_FUNCTIONS_EXPLAINED.md`](FETCH_FUNCTIONS_EXPLAINED.md)**: 📗 Análisis técnico de funciones (nuevo)
-  - Explicación de las 9 funciones FETCH
-  - Algoritmos y estrategias de implementación
-  - Gestión de memoria y debugging tips
-  - Conceptos clave para entender el código
+- **DTLS** — seguridad en capa de transporte, obligatorio en producción
+- **CoAP Observe** — notificaciones push cuando cambia un SID
+- **Datastores NMDA** — running / intended / candidate / operational (RFC 8342)
+- **YANG Library** — endpoint `/c/ietf-yang-library` con catálogo de módulos
+- **Locking** — mutex para acceso concurrente al datastore
 
 ---
 
-## 🤝 Contribuciones
+## Documentación
 
-Este proyecto es parte de un **Trabajo de Fin de Grado (TFG)**. 
+Tengo guías más detalladas en `docs/`:
 
-
-## 👤 Autor
-
-**Pablo Hernández Galindo**  
-📧 Email: [p.hernandezgalindo@um.es]  
-🎓 Universidad: [Universidad de Murcia]  
-📅 Año: 2026
+- [01 — RFC 9254 en detalle](docs/01_RFC9254_CORECONF.md) — SIDs, delta encoding, las 6 operaciones con diagramas
+- [02 — Arquitectura](docs/02_ARQUITECTURA.md) — cada módulo explicado, flujo completo de un iPATCH
+- [03 — CoAP y libcoap](docs/03_COAP_LIBCOAP.md) — estructura de frames CoAP, API de libcoap, CBOR
+- [04 — Docker](docs/04_DOCKER_IOT.md) — Dockerfile línea a línea, red bridge, comandos
 
 ---
 
-## 🙏 Referencias
+## Referencias
 
-- **Nordic Semiconductor** por la librería zcbor
-- **IETF CORE Working Group** por el desarrollo del estándar CORECONF
-- **Comunidad CBOR** por la especificación RFC 8949
-
-
----
-
-
-
+- [RFC 9254](https://www.rfc-editor.org/rfc/rfc9254) — CORECONF
+- [RFC 7252](https://www.rfc-editor.org/rfc/rfc7252) — CoAP
+- [RFC 8949](https://www.rfc-editor.org/rfc/rfc8949) — CBOR
+- [RFC 9132](https://www.rfc-editor.org/rfc/rfc9132) — SIDs
+- [RFC 7950](https://www.rfc-editor.org/rfc/rfc7950) — YANG 1.1
+- [libcoap](https://libcoap.net)
+- [zcbor](https://github.com/zephyrproject-rtos/zcbor)
