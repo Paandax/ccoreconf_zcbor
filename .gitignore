@@ -72,3 +72,4 @@ __pycache__/
 # Documentación generada
 docs/_build/
 zcbor/
+docs/
