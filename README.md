@@ -168,7 +168,7 @@ quit
 # Construir imagen (desde el root del proyecto)
 docker build -t iot-coreconf -f iot_containers/Dockerfile .
 
-# Levantar gateway + device_1 (temperatura) + device_2 (humedad)
+# Levantar gateway + device_1 (temperatura) + device_2 (humefind_or_create_devicedad)
 cd iot_containers
 docker compose up -d
 

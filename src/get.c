@@ -78,8 +78,8 @@ size_t create_get_response(uint8_t *buffer, size_t buffer_size,
     size_t entry_count = map->size;
     if (entry_count == 0) {
         /* Datastore vacío: devolver mapa CBOR vacío {} */
-        zcbor_state_t state[5];
-        zcbor_new_encode_state(state, 5, buffer, buffer_size, 0);
+        zcbor_state_t state[8];
+        zcbor_new_encode_state(state, 8, buffer, buffer_size, 1);
         if (!zcbor_map_start_encode(state, 0)) return 0;
         if (!zcbor_map_end_encode(state, 0)) return 0;
         return (size_t)(state[0].payload - buffer);
@@ -89,8 +89,8 @@ size_t create_get_response(uint8_t *buffer, size_t buffer_size,
      * Un único estado cubre todo el buffer (a diferencia de fetch.c
      * que usa un estado por entrada porque el formato es un cbor-seq).
      */
-    zcbor_state_t state[5];
-    zcbor_new_encode_state(state, 5, buffer, buffer_size, 0);
+    zcbor_state_t state[8];
+    zcbor_new_encode_state(state, 8, buffer, buffer_size, 1);
 
     /* --- Abrir mapa CBOR con entry_count entradas ---
      * zcbor_map_start_encode escribe el header CBOR del mapa.
@@ -193,8 +193,8 @@ CoreconfValueT *parse_get_response(const uint8_t *data, size_t len)
      *                        max_elements, value_limits, n_limits)
      * max_elements=1 porque el payload raíz es un único mapa CBOR.
      */
-    zcbor_state_t state[5];
-    zcbor_new_decode_state(state, 5, data, len, 1, NULL, 0);
+    zcbor_state_t state[8];
+    zcbor_new_decode_state(state, 8, data, len, 1, NULL, 0);
 
     /* --- Delegar a cborToCoreconfValue ---
      * Esta función ya implementa la decodificación completa de CBOR:

@@ -91,6 +91,10 @@ bool coreconfToCBOR(CoreconfValueT *coreconfValue, zcbor_state_t *state) {
         case CORECONF_FALSE:
             res = zcbor_bool_put(state, false);
             break;
+        case CORECONF_NULL:
+            /* CBOR null (0xf6) — usado en iPATCH para indicar eliminación de un nodo */
+            res = zcbor_nil_put(state, NULL);
+            break;
         default:
             // Si llego aquí es que hay algún tipo no soportado
             return false;
@@ -170,6 +174,13 @@ CoreconfValueT *cborToCoreconfValue(zcbor_state_t *state, unsigned indent) {
                 bool boolValue;
                 if (zcbor_bool_decode(state, &boolValue)) {
                     coreconfValue = createCoreconfBoolean(boolValue);
+                } else if (zcbor_nil_expect(state, NULL)) {
+                    /* CBOR null (0xf6): en iPATCH significa "borrar este nodo" */
+                    coreconfValue = malloc(sizeof(CoreconfValueT));
+                    if (coreconfValue) {
+                        coreconfValue->type = CORECONF_NULL;
+                        coreconfValue->data.u64 = 0;
+                    }
                 }
             }
             break;

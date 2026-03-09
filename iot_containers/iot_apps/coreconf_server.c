@@ -1,15 +1,20 @@
 /**
- * coreconf_server.c - Servidor CORECONF unificado (RFC 9254)
+ * coreconf_server.c - Servidor CORECONF (draft-ietf-core-comi-20)
  *
- * Soporta TODOS los métodos CORECONF en /c:
- *   POST   /c  → STORE: carga datos iniciales (CF=60)
- *   FETCH  /c  → lee SIDs específicos        (CF=141 req, CF=142 resp)
- *   GET    /c  → lee datastore completo      (CF=142 resp)
- *   iPATCH /c  → actualización parcial       (CF=141 req, sin payload resp)
- *   PUT    /c  → reemplazo total             (CF=142 req, sin payload resp)
- *   DELETE /c[?k=SID] → elimina SID(s)      (sin CF)
+ * UN ÚNICO DATASTORE en /c (draft §2.4: "A CORECONF server supports a
+ * single unified datastore").  El datastore puede contener nodos de
+ * cualquier tipo: temperatura, humedad, etc., cada uno con su propio SID.
  *
- * Datastore multi-dispositivo: cada device_id tiene su propio datastore.
+ * Métodos soportados:
+ *   PUT    /c  → inicializar / reemplazar datastore  (CF=140)
+ *   FETCH  /c  → leer SIDs concretos               (CF=141 req, CF=142 resp)
+ *   GET    /c  → leer datastore completo            (CF=140 resp)
+ *   iPATCH /c  → actualización parcial              (CF=142 req)
+ *   DELETE /c  → borrar datastore completo
+ *   POST   /c  → solo RPC/acciones (no para datos)
+ *
+ * No hay parámetros ?id= — el identificador de nodo va siempre en el
+ * payload (draft §3.2.3 para iPATCH, §3.1.3 para FETCH).
  */
 
 #include <coap3/coap.h>
@@ -35,23 +40,72 @@
 #include "../../include/ipatch.h"
 #include "../../include/put.h"
 #include "../../include/delete.h"
+#include "../../include/sids.h"
 #include "../../coreconf_zcbor_generated/zcbor_encode.h"
 #include "../../coreconf_zcbor_generated/zcbor_decode.h"
 
 #define BUFFER_SIZE 4096
-#define MAX_DEVICES 32
+
+/* Content-Format values (draft-ietf-core-comi-20) */
+#define CF_YANG_DATA_CBOR   140   /* application/yang-data+cbor;id=sid   */
+#define CF_YANG_IDENTIFIERS 141   /* application/yang-identifiers+cbor-seq */
+#define CF_YANG_INSTANCES   142   /* application/yang-instances+cbor-seq  */
 
 static int quit = 0;
 
-/* ── Datastore por dispositivo ── */
-typedef struct {
-    char           device_id[64];
-    CoreconfValueT *data;
-    int            exists;
-} Device;
+/* ── Datastore único (draft §2.4) ── */
+static CoreconfValueT *g_datastore = NULL;
+static int             g_ds_exists = 0;
 
-static Device devices[MAX_DEVICES];
-static int    device_count = 0;
+/* ── Carga el datastore de los ejemplos del draft §3.3.1 ── */
+static void init_ietf_example_datastore(void) {
+    CoreconfValueT *ds = createCoreconfHashmap();
+
+    /* clock container: SID_SYS_CLOCK → {DELTA_BOOT: boot-datetime, DELTA_CURRENT: current-datetime} */
+    CoreconfValueT *clock_c = createCoreconfHashmap();
+    insertCoreconfHashMap(clock_c->data.map_value, DELTA_CLOCK_BOOT_DATETIME,
+        createCoreconfString("2014-10-05T09:00:00Z"));
+    insertCoreconfHashMap(clock_c->data.map_value, DELTA_CLOCK_CURRENT_DATETIME,
+        createCoreconfString("2016-10-26T12:16:31Z"));
+    insertCoreconfHashMap(ds->data.map_value, SID_SYS_CLOCK, clock_c);
+
+    /* interface list: SID_IF_INTERFACE → [{name:eth0, desc:..., type:ethernetCsmacd, ...}] */
+    CoreconfValueT *iface = createCoreconfHashmap();
+    insertCoreconfHashMap(iface->data.map_value, DELTA_IF_NAME,        createCoreconfString("eth0"));
+    insertCoreconfHashMap(iface->data.map_value, DELTA_IF_DESCRIPTION, createCoreconfString("Ethernet adaptor"));
+    insertCoreconfHashMap(iface->data.map_value, DELTA_IF_TYPE,        createCoreconfUint64(SID_IF_IDENTITY_ETHERNET_CSMACD));
+    insertCoreconfHashMap(iface->data.map_value, DELTA_IF_ENABLED,     createCoreconfBoolean(true));
+    insertCoreconfHashMap(iface->data.map_value, DELTA_IF_OPER_STATUS, createCoreconfUint64(3));
+    CoreconfValueT *ifaces = createCoreconfArray();
+    addToCoreconfArray(ifaces, iface);
+    free(iface);
+    insertCoreconfHashMap(ds->data.map_value, SID_IF_INTERFACE, ifaces);
+
+    /* ntp/enabled: SID_SYS_NTP_ENABLED → false */
+    insertCoreconfHashMap(ds->data.map_value, SID_SYS_NTP_ENABLED, createCoreconfBoolean(false));
+
+    /* ntp/server list: SID_SYS_NTP_SERVER → [{name:tac.nrc.ca, prefer:false, udp:{address:...}}] */
+    CoreconfValueT *udp = createCoreconfHashmap();
+    insertCoreconfHashMap(udp->data.map_value, DELTA_NTP_UDP_ADDRESS, createCoreconfString("128.100.49.105"));
+    CoreconfValueT *srv = createCoreconfHashmap();
+    insertCoreconfHashMap(srv->data.map_value, DELTA_NTP_SERVER_NAME,   createCoreconfString("tac.nrc.ca"));
+    insertCoreconfHashMap(srv->data.map_value, DELTA_NTP_SERVER_PREFER, createCoreconfBoolean(false));
+    insertCoreconfHashMap(srv->data.map_value, DELTA_NTP_SERVER_UDP,    udp);
+    CoreconfValueT *servers = createCoreconfArray();
+    addToCoreconfArray(servers, srv);
+    free(srv);
+    insertCoreconfHashMap(ds->data.map_value, SID_SYS_NTP_SERVER, servers);
+
+    if (g_datastore) freeCoreconf(g_datastore, true);
+    g_datastore = ds;
+    g_ds_exists = 1;
+    printf("Datastore ietf-example cargado: %zu SIDs (clock %d, ifaces %d, ntp %d/%d)\n\n",
+           g_datastore->data.map_value->size,
+           SID_SYS_CLOCK, SID_IF_INTERFACE, SID_SYS_NTP_ENABLED, SID_SYS_NTP_SERVER);
+    /* dummy reference to suppress unused-macro warnings if any */
+    (void)SID_IETF_INTERFACES_MODULE; (void)SID_IETF_SYSTEM_MODULE;
+
+}
 
 /* ────────────────────────────────────────────────────────────
  * Helpers
@@ -96,122 +150,42 @@ static void send_error(coap_pdu_t *resp, coap_pdu_code_t code,
     coap_pdu_set_code(resp, code);
     if (len > 0) {
         uint8_t cf[4];
-        size_t cfl = coap_encode_var_safe(cf, sizeof(cf), COAP_MEDIA_TYPE_YANG_DATA_CBOR);
+        size_t cfl = coap_encode_var_safe(cf, sizeof(cf), CF_YANG_DATA_CBOR);
         coap_add_option(resp, COAP_OPTION_CONTENT_FORMAT, cfl, cf);
         coap_add_data(resp, len, buf);
     }
 }
 
-/* ── Buscar / crear dispositivo por device_id ── */
-static Device *find_device(const char *id) {
-    for (int i = 0; i < device_count; i++)
-        if (strcmp(devices[i].device_id, id) == 0)
-            return &devices[i];
-    return NULL;
-}
-
-static Device *find_or_create_device(const char *id) {
-    Device *d = find_device(id);
-    if (d) return d;
-    if (device_count >= MAX_DEVICES) return NULL;
-    strncpy(devices[device_count].device_id, id, 63);
-    devices[device_count].data   = NULL;
-    devices[device_count].exists = 0;
-    return &devices[device_count++];
-}
-
-/* Copia SIDs ≥ 10 del mapa src → mapa dst */
-typedef struct { CoreconfHashMapT *dst; } CopyCtx;
-static void copy_sid(CoreconfObjectT *obj, void *udata) {
-    CopyCtx *ctx = (CopyCtx *)udata;
-    if (obj->key >= 10 && obj->value) {
-        CoreconfValueT *cp = malloc(sizeof(CoreconfValueT));
-        memcpy(cp, obj->value, sizeof(CoreconfValueT));
-        if (obj->value->type == CORECONF_STRING && obj->value->data.string_value)
-            cp->data.string_value = strdup(obj->value->data.string_value);
-        insertCoreconfHashMap(ctx->dst, obj->key, cp);
-    }
-}
-
-/* ── Obtener device_id de la query "id=<val>" ── */
-static int get_query_device_id(const coap_string_t *q, char *out, size_t out_sz) {
-    if (!q || q->length == 0) return 0;
-    const char *s = (const char *)q->s;
-    size_t      l = q->length;
-    const char *p = s;
-    while ((size_t)(p - s) < l) {
-        if (strncmp(p, "id=", 3) == 0) {
-            p += 3;
-            const char *end = memchr(p, '&', l - (size_t)(p - s));
-            size_t vl = end ? (size_t)(end - p) : l - (size_t)(p - s);
-            if (vl >= out_sz) vl = out_sz - 1;
-            memcpy(out, p, vl);
-            out[vl] = '\0';
-            return 1;
-        }
-        const char *amp = memchr(p, '&', l - (size_t)(p - s));
-        if (!amp) break;
-        p = amp + 1;
-    }
-    return 0;
-}
-
 /* ════════════════════════════════════════════════════════════
- * POST /c  — STORE
+ * POST /c  — solo para RPC/acciones (draft §3.2.2)
+ * No se usa para inicializar datos: eso es PUT.
  * ══════════════════════════════════════════════════════════*/
 static void handle_post(coap_resource_t *rsrc, coap_session_t *sess,
                          const coap_pdu_t *req, const coap_string_t *query,
                          coap_pdu_t *resp) {
-    (void)rsrc; (void)sess; (void)query;
-    size_t len; const uint8_t *data;
-    if (!coap_get_data(req, &len, &data)) {
-        send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012, "missing payload");
-        return;
-    }
-    print_cbor_hex("[STORE] payload", data, len);
-
-    zcbor_state_t st[5];
-    zcbor_new_decode_state(st, 5, data, len, 1, NULL, 0);
-    CoreconfValueT *recv = cborToCoreconfValue(st, 0);
-    if (!recv || recv->type != CORECONF_HASHMAP) {
-        send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012, "bad CBOR");
-        if (recv) freeCoreconf(recv, true);
-        return;
-    }
-
-    CoreconfValueT *id_v = getCoreconfHashMap(recv->data.map_value, 1);
-    const char *device_id = (id_v && id_v->type == CORECONF_STRING)
-                             ? id_v->data.string_value : "unknown";
-
-    Device *dev = find_or_create_device(device_id);
-    if (!dev) {
-        send_error(resp, COAP_RESPONSE_CODE_INTERNAL_ERROR, 1019, "too many devices");
-        freeCoreconf(recv, true); return;
-    }
-
-    if (dev->data) { freeCoreconf(dev->data, true); dev->data = NULL; }
-    dev->data = createCoreconfHashmap();
-    CopyCtx ctx = { dev->data->data.map_value };
-    iterateCoreconfHashMap(recv->data.map_value, &ctx, copy_sid);
-    freeCoreconf(recv, true);
-    dev->exists = 1;
-
-    printf("[STORE] device=%s  SIDs=%zu\n", device_id, dev->data->data.map_value->size);
-    coap_pdu_set_code(resp, COAP_RESPONSE_CODE_CHANGED);
+    (void)rsrc; (void)sess; (void)req; (void)query;
+    /* El draft reserva POST para RPC/acciones YANG, no para cargar datos.
+     * Para inicializar el datastore usa PUT /c  (CF=140). */
+    send_error(resp, COAP_RESPONSE_CODE_NOT_ALLOWED, 1012,
+               "POST is for RPC/actions only. Use PUT to initialize datastore.");
+    printf("[POST] rechazado — usar PUT para inicializar datastore\n");
 }
 
 /* ════════════════════════════════════════════════════════════
- * FETCH /c  — leer SIDs específicos (CF=141 req, CF=142 resp)
+ * FETCH /c  — leer SIDs específicos (draft §3.1.3)
+ * CF=141 (yang-identifiers+cbor-seq) en la petición: lista de SIDs
+ * CF=142 (yang-instances+cbor-seq)  en la respuesta: mapa SID→valor
+ * Sin parámetros de query.
  * ══════════════════════════════════════════════════════════*/
 static void handle_fetch(coap_resource_t *rsrc, coap_session_t *sess,
                           const coap_pdu_t *req, const coap_string_t *query,
                           coap_pdu_t *resp) {
-    (void)rsrc; (void)sess;
-    /* CF=141 requerido */
+    (void)rsrc; (void)sess; (void)query;
+
     uint16_t cf = get_content_format(req);
-    if (cf != COAP_MEDIA_TYPE_YANG_PATCH_CBOR) {
+    if (cf != CF_YANG_IDENTIFIERS) {
         send_error(resp, COAP_RESPONSE_CODE_UNSUPPORTED_CONTENT_FORMAT,
-                   1012, "FETCH requires CF=141");
+                   1012, "FETCH requires CF=141 (yang-identifiers+cbor-seq)");
         return;
     }
 
@@ -222,21 +196,13 @@ static void handle_fetch(coap_resource_t *rsrc, coap_session_t *sess,
     }
     print_cbor_hex("[FETCH] req", data, len);
 
-    /* Elegir dispositivo */
-    char dev_id[64] = "unknown";
-    get_query_device_id(query, dev_id, sizeof(dev_id));
-    Device *dev = find_device(dev_id);
-    if (!dev || !dev->data) {
-        /* Usar primer dispositivo si no se especificó */
-        if (device_count > 0 && devices[0].data) dev = &devices[0];
-        else {
-            send_error(resp, COAP_RESPONSE_CODE_NOT_FOUND,
-                       1019, "no datastore — POST first");
-            return;
-        }
+    if (!g_datastore || !g_ds_exists) {
+        send_error(resp, COAP_RESPONSE_CODE_NOT_FOUND,
+                   1019, "datastore empty — use PUT /c first");
+        return;
     }
 
-    /* Parsear lista de SIDs */
+    /* Parsear lista de SIDs del payload (cbor-seq de uint) */
     zcbor_state_t st[5];
     zcbor_new_decode_state(st, 5, data, len, len, NULL, 0);
     uint64_t sids[64]; int n = 0;
@@ -249,15 +215,15 @@ static void handle_fetch(coap_resource_t *rsrc, coap_session_t *sess,
         send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012, "no SIDs in request");
         return;
     }
-    printf("[FETCH] device=%s  SIDs=%d\n", dev->device_id, n);
+    printf("[FETCH] %d SIDs pedidos\n", n);
 
-    /* Construir respuesta: mapa CBOR con los SIDs pedidos */
+    /* Respuesta: mapa CBOR {SID: valor, ...} con CF=142 */
     uint8_t buf[BUFFER_SIZE];
-    zcbor_state_t enc[5];
-    zcbor_new_encode_state(enc, 5, buf, BUFFER_SIZE, 0);
+    zcbor_state_t enc[8];
+    zcbor_new_encode_state(enc, 8, buf, BUFFER_SIZE, 1);
     zcbor_map_start_encode(enc, n);
     for (int i = 0; i < n; i++) {
-        CoreconfValueT *val = getCoreconfHashMap(dev->data->data.map_value, sids[i]);
+        CoreconfValueT *val = getCoreconfHashMap(g_datastore->data.map_value, sids[i]);
         if (val) {
             zcbor_uint64_put(enc, sids[i]);
             coreconfToCBOR(val, enc);
@@ -267,57 +233,57 @@ static void handle_fetch(coap_resource_t *rsrc, coap_session_t *sess,
     size_t resp_len = (size_t)(enc[0].payload - buf);
 
     uint8_t cf_buf[4];
-    size_t cfl = coap_encode_var_safe(cf_buf, sizeof(cf_buf), COAP_MEDIA_TYPE_YANG_DATA_CBOR);
+    size_t cfl = coap_encode_var_safe(cf_buf, sizeof(cf_buf), CF_YANG_INSTANCES);
     coap_add_option(resp, COAP_OPTION_CONTENT_FORMAT, cfl, cf_buf);
     coap_pdu_set_code(resp, COAP_RESPONSE_CODE_CONTENT);
     coap_add_data(resp, resp_len, buf);
-    printf("[FETCH] resp %zu bytes\n", resp_len);
+    printf("[FETCH] resp %zu bytes (CF=142)\n", resp_len);
 }
 
 /* ════════════════════════════════════════════════════════════
- * GET /c  — leer datastore completo (CF=142)
+ * GET /c  — leer datastore completo (draft §3.3)
+ * Sin parámetros de query. Responde CF=140 con todo el datastore.
  * ══════════════════════════════════════════════════════════*/
 static void handle_get(coap_resource_t *rsrc, coap_session_t *sess,
                         const coap_pdu_t *req, const coap_string_t *query,
                         coap_pdu_t *resp) {
-    /* Elegir dispositivo */
-    char dev_id[64] = "";
-    get_query_device_id(query, dev_id, sizeof(dev_id));
-    Device *dev = (dev_id[0] != '\0') ? find_device(dev_id) : NULL;
-    if (!dev && device_count > 0) dev = &devices[0];
+    (void)query;
 
-    if (!dev || !dev->data || dev->data->data.map_value->size == 0) {
+    if (!g_datastore || !g_ds_exists || g_datastore->data.map_value->size == 0) {
         send_error(resp, COAP_RESPONSE_CODE_NOT_FOUND,
-                   1013, "datastore empty or not found");
+                   1013, "datastore empty — use PUT /c first");
         return;
     }
 
     uint8_t buf[BUFFER_SIZE];
-    size_t  len = create_get_response(buf, BUFFER_SIZE, dev->data);
+    size_t  len = create_get_response(buf, BUFFER_SIZE, g_datastore);
     if (len == 0) {
         send_error(resp, COAP_RESPONSE_CODE_INTERNAL_ERROR, 1013, "serialize error");
         return;
     }
 
-    printf("[GET] device=%s  %zu bytes  %zu SIDs\n",
-           dev->device_id, len, dev->data->data.map_value->size);
+    printf("[GET] %zu bytes  %zu SIDs\n", len, g_datastore->data.map_value->size);
     coap_pdu_set_code(resp, COAP_RESPONSE_CODE_CONTENT);
     coap_add_data_large_response(rsrc, sess, req, resp, query,
-                                  COAP_MEDIA_TYPE_YANG_DATA_CBOR, -1, 0,
+                                  CF_YANG_DATA_CBOR, -1, 0,
                                   len, buf, NULL, NULL);
 }
 
 /* ════════════════════════════════════════════════════════════
- * iPATCH /c  — actualización parcial (CF=141)
+ * iPATCH /c  — actualización parcial (draft §3.2.3)
+ * Sin parámetros de query. El identificador de nodo (SID) va en el PAYLOAD.
+ * CF=142 (yang-instances+cbor-seq): mapa {SID: nuevo_valor}
+ * Para borrar un nodo: valor = null (CBOR 0xf6)
  * ══════════════════════════════════════════════════════════*/
 static void handle_ipatch(coap_resource_t *rsrc, coap_session_t *sess,
                            const coap_pdu_t *req, const coap_string_t *query,
                            coap_pdu_t *resp) {
-    (void)rsrc; (void)sess;
+    (void)rsrc; (void)sess; (void)query;
+
     uint16_t cf = get_content_format(req);
-    if (cf != COAP_MEDIA_TYPE_YANG_PATCH_CBOR) {
+    if (cf != CF_YANG_INSTANCES) {
         send_error(resp, COAP_RESPONSE_CODE_UNSUPPORTED_CONTENT_FORMAT,
-                   1012, "iPATCH requires CF=141");
+                   1012, "iPATCH requires CF=142 (yang-instances+cbor-seq)");
         return;
     }
 
@@ -328,40 +294,32 @@ static void handle_ipatch(coap_resource_t *rsrc, coap_session_t *sess,
     }
     print_cbor_hex("[iPATCH] payload", data, len);
 
-    char dev_id[64] = "";
-    get_query_device_id(query, dev_id, sizeof(dev_id));
-    Device *dev = (dev_id[0] != '\0') ? find_device(dev_id) : NULL;
-    if (!dev && device_count > 0) dev = &devices[0];
-    if (!dev || !dev->data) {
+    if (!g_datastore || !g_ds_exists) {
         send_error(resp, COAP_RESPONSE_CODE_NOT_FOUND,
-                   1019, "no datastore — POST first");
+                   1019, "no datastore — use PUT /c first");
         return;
     }
 
-    CoreconfValueT *patch = parse_ipatch_request(data, len);
-    if (!patch || patch->type != CORECONF_HASHMAP) {
-        send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012, "bad CBOR patch");
-        if (patch) freeCoreconf(patch, true);
-        return;
-    }
-
-    int n = apply_ipatch(dev->data, patch);
-    freeCoreconf(patch, true);
-    printf("[iPATCH] device=%s  %d SIDs actualizados\n", dev->device_id, n);
+    int n = apply_ipatch_raw(g_datastore, data, len);
+    printf("[iPATCH] %d SIDs actualizados  (%zu SIDs en datastore)\n",
+           n, g_datastore->data.map_value->size);
     coap_pdu_set_code(resp, COAP_RESPONSE_CODE_CHANGED);
 }
 
 /* ════════════════════════════════════════════════════════════
- * PUT /c  — reemplazo total (CF=142)
+ * PUT /c  — inicializar o reemplazar datastore (draft §3.3)
+ * Sin parámetros de query. CF=140 (yang-data+cbor;id=sid).
+ * 2.01 Created si era nuevo, 2.04 Changed si ya existía.
  * ══════════════════════════════════════════════════════════*/
 static void handle_put(coap_resource_t *rsrc, coap_session_t *sess,
                         const coap_pdu_t *req, const coap_string_t *query,
                         coap_pdu_t *resp) {
-    (void)rsrc; (void)sess;
+    (void)rsrc; (void)sess; (void)query;
+
     uint16_t cf = get_content_format(req);
-    if (cf != COAP_MEDIA_TYPE_YANG_DATA_CBOR) {
+    if (cf != CF_YANG_DATA_CBOR) {
         send_error(resp, COAP_RESPONSE_CODE_UNSUPPORTED_CONTENT_FORMAT,
-                   1012, "PUT requires CF=142");
+                   1012, "PUT requires CF=140 (yang-data+cbor;id=sid)");
         return;
     }
 
@@ -372,16 +330,6 @@ static void handle_put(coap_resource_t *rsrc, coap_session_t *sess,
     }
     print_cbor_hex("[PUT] payload", data, len);
 
-    char dev_id[64] = "";
-    get_query_device_id(query, dev_id, sizeof(dev_id));
-    Device *dev = (dev_id[0] != '\0') ? find_device(dev_id) : NULL;
-    if (!dev && device_count > 0) dev = &devices[0];
-    if (!dev) {
-        send_error(resp, COAP_RESPONSE_CODE_NOT_FOUND,
-                   1019, "no device — POST first");
-        return;
-    }
-
     CoreconfValueT *new_ds = parse_put_request(data, len);
     if (!new_ds || new_ds->type != CORECONF_HASHMAP) {
         send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012, "bad CBOR datastore");
@@ -389,59 +337,36 @@ static void handle_put(coap_resource_t *rsrc, coap_session_t *sess,
         return;
     }
 
-    int was_existing = dev->exists;
-    if (dev->data) freeCoreconf(dev->data, true);
-    dev->data   = new_ds;
-    dev->exists = 1;
+    int was_existing = g_ds_exists;
+    if (g_datastore) freeCoreconf(g_datastore, true);
+    g_datastore = new_ds;
+    g_ds_exists = 1;
 
-    printf("[PUT] device=%s  %zu SIDs  (%s)\n",
-           dev->device_id, dev->data->data.map_value->size,
+    printf("[PUT] %zu SIDs  (%s)\n", g_datastore->data.map_value->size,
            was_existing ? "2.04 Changed" : "2.01 Created");
     coap_pdu_set_code(resp, was_existing ? COAP_RESPONSE_CODE_CHANGED
                                          : COAP_RESPONSE_CODE_CREATED);
 }
 
 /* ════════════════════════════════════════════════════════════
- * DELETE /c[?k=SID&k=SID]  — eliminar SIDs o datastore
+ * DELETE /c  — borrar datastore completo (draft §3.3)
+ * Sin parámetros de query. Para borrar nodos concretos, usar iPATCH con null.
  * ══════════════════════════════════════════════════════════*/
 static void handle_delete(coap_resource_t *rsrc, coap_session_t *sess,
                            const coap_pdu_t *req, const coap_string_t *query,
                            coap_pdu_t *resp) {
-    (void)rsrc; (void)sess; (void)req;
+    (void)rsrc; (void)sess; (void)req; (void)query;
 
-    char dev_id[64] = "";
-    get_query_device_id(query, dev_id, sizeof(dev_id));
-    Device *dev = (dev_id[0] != '\0') ? find_device(dev_id) : NULL;
-    if (!dev && device_count > 0) dev = &devices[0];
-
-    if (!dev || !dev->data || dev->data->data.map_value->size == 0) {
-        send_error(resp, COAP_RESPONSE_CODE_NOT_FOUND,
-                   1013, "datastore not found");
+    if (!g_datastore || !g_ds_exists) {
+        send_error(resp, COAP_RESPONSE_CODE_NOT_FOUND, 1013, "datastore not found");
         return;
     }
 
-    /* Extraer k=SID de la query (puede haber id=X además) */
-    uint64_t sids[DELETE_MAX_SIDS]; int n = 0;
-    if (query && query->length > 0) {
-        /* Filtramos solo los parámetros k= */
-        const uint8_t *q = query->s;
-        size_t ql = query->length;
-        n = parse_delete_query(q, ql, sids, DELETE_MAX_SIDS);
-    }
-
-    if (n == 0) {
-        /* Sin k= → borrar datastore completo */
-        size_t old = dev->data->data.map_value->size;
-        freeCoreconf(dev->data, true);
-        dev->data   = NULL;
-        dev->exists = 0;
-        printf("[DELETE] device=%s  datastore completo eliminado (%zu SIDs)\n",
-               dev->device_id, old);
-    } else {
-        int del = apply_delete(dev->data->data.map_value, sids, n);
-        printf("[DELETE] device=%s  %d/%d SIDs eliminados  %zu restantes\n",
-               dev->device_id, del, n, dev->data->data.map_value->size);
-    }
+    size_t old = g_datastore->data.map_value->size;
+    freeCoreconf(g_datastore, true);
+    g_datastore = NULL;
+    g_ds_exists = 0;
+    printf("[DELETE] datastore eliminado (%zu SIDs)\n", old);
     coap_pdu_set_code(resp, COAP_RESPONSE_CODE_DELETED);
 }
 
@@ -454,16 +379,18 @@ int main(void) {
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
 
     printf("╔══════════════════════════════════════════════════════════════╗\n");
-    printf("║   CORECONF SERVER — RFC 9254 unificado (libcoap)           ║\n");
+    printf("║   CORECONF SERVER — draft-ietf-core-comi-20 (libcoap)      ║\n");
     printf("╠══════════════════════════════════════════════════════════════╣\n");
-    printf("║  POST   /c           → STORE (CF=60)                       ║\n");
-    printf("║  FETCH  /c           → leer SIDs (CF=141→142)              ║\n");
-    printf("║  GET    /c[?id=X]    → datastore completo (CF=142)         ║\n");
-    printf("║  iPATCH /c[?id=X]    → actualizar SIDs (CF=141)            ║\n");
-    printf("║  PUT    /c[?id=X]    → reemplazar datastore (CF=142)       ║\n");
-    printf("║  DELETE /c[?id=X][&k=SID] → eliminar (2.02 sin payload)   ║\n");
+    printf("║  PUT    /c  CF=140   → inicializar/reemplazar datastore     ║\n");
+    printf("║  FETCH  /c  CF=141   → leer SIDs (lista en payload)        ║\n");
+    printf("║  GET    /c           → datastore completo                  ║\n");
+    printf("║  iPATCH /c  CF=142   → actualizar nodos (SID en payload)   ║\n");
+    printf("║  DELETE /c           → borrar datastore completo           ║\n");
+    printf("║  POST   /c           → RPC/acciones únicamente             ║\n");
+    printf("╠══════════════════════════════════════════════════════════════╣\n");
+    printf("║  Datastore único — temperatura, humedad, etc.              ║\n");
     printf("╚══════════════════════════════════════════════════════════════╝\n\n");
-    printf("🌐 Escuchando en coap://0.0.0.0:5683\n\n");
+    printf("Escuchando en coap://0.0.0.0:5683/c\n\n");
 
     coap_startup();
     coap_set_log_level(COAP_LOG_WARN);
@@ -493,13 +420,12 @@ int main(void) {
                       coap_make_str_const("\"core.c.ds\""), 0); (void)a;
 
     coap_add_resource(ctx, res);
-    printf("✅ Servidor listo — esperando dispositivos...\n\n");
+    init_ietf_example_datastore();
 
     while (!quit) coap_io_process(ctx, 1000);
 
     printf("\nApagando servidor...\n");
-    for (int i = 0; i < device_count; i++)
-        if (devices[i].data) freeCoreconf(devices[i].data, true);
+    if (g_datastore) freeCoreconf(g_datastore, true);
     coap_free_context(ctx);
     coap_cleanup();
     return 0;

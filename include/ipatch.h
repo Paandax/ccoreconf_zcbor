@@ -132,4 +132,41 @@ int apply_ipatch(CoreconfValueT *datastore, const CoreconfValueT *patch);
 size_t create_ipatch_request(uint8_t *buffer, size_t buffer_size,
                               const CoreconfValueT *patch);
 
+/**
+ * @brief Aplicar parche iPATCH directamente desde el buffer CBOR
+ *
+ * Versión extendida que soporta claves uint (SID simple) y claves array
+ * [SID, key_str] (instance-identifier de lista YANG).
+ *
+ * { SID: valor }           → actualizar/borrar nodo simple
+ * { [SID, "key"]: null }   → borrar instancia de lista
+ * { [SID, "key"]: {mapa} } → añadir/actualizar instancia de lista
+ *
+ * @param datastore  CORECONF_HASHMAP del servidor (modificado in-place)
+ * @param data       Buffer CBOR del payload iPATCH (CF=142)
+ * @param len        Longitud del buffer
+ * @return           Número de entradas aplicadas, o -1 si error
+ */
+int apply_ipatch_raw(CoreconfValueT *datastore, const uint8_t *data, size_t len);
+
+/**
+ * @brief Crear payload iPATCH con instance-identifier (lado cliente)
+ *
+ * Encoda:  { [SID, "key_str"]: valor }
+ *
+ * Usado para borrar/actualizar instancias de listas YANG:
+ *   { [1756, "tac.nrc.ca"]: null }     → borrar servidor NTP
+ *   { [1756, "tic.nrc.ca"]: {3:...} }  → añadir servidor NTP
+ *
+ * @param buffer       Buffer de salida
+ * @param buffer_size  Tamaño del buffer
+ * @param sid          SID de la lista YANG
+ * @param key_str      Valor de la clave de la instancia
+ * @param val          Valor a escribir, o NULL para CBOR null (borrar)
+ * @return             Bytes escritos, o 0 si error
+ */
+size_t create_ipatch_iid_request(uint8_t *buffer, size_t buffer_size,
+                                  uint64_t sid, const char *key_str,
+                                  CoreconfValueT *val);
+
 #endif /* IPATCH_H */

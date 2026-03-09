@@ -49,8 +49,8 @@ CoreconfValueT *parse_put_request(const uint8_t *data, size_t len)
 {
     if (!data || len == 0) return NULL;
 
-    zcbor_state_t state[5];
-    zcbor_new_decode_state(state, 5, data, len, 1, NULL, 0);
+    zcbor_state_t state[8];
+    zcbor_new_decode_state(state, 8, data, len, 1, NULL, 0);
 
     /* cborToCoreconfValue maneja todos los tipos CBOR → CORECONF.
      * Para PUT el payload raíz es un mapa → retorna CORECONF_HASHMAP. */
@@ -84,8 +84,8 @@ size_t create_put_request(uint8_t *buffer, size_t buffer_size,
 
     size_t entry_count = map->size;
 
-    zcbor_state_t state[5];
-    zcbor_new_encode_state(state, 5, buffer, buffer_size, 0);
+    zcbor_state_t state[8];
+    zcbor_new_encode_state(state, 8, buffer, buffer_size, 1);
 
     if (entry_count == 0) {
         /* Datastore vacío → mapa CBOR vacío {} */

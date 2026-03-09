@@ -1,14 +1,28 @@
 version: '3.8'
 
+# Arquitectura CORECONF (draft-ietf-core-comi-20)
+# ─────────────────────────────────────────────────────────────
+# Un servidor CORECONF = UN único datastore en /c  (draft §2.4)
+# El datastore puede tener nodos de temperatura, humedad, etc.
+# No hay routing ?id=: el cliente accede directamente al /c del servidor.
+#
+# Usar:
+#   docker compose up -d --build
+#   docker attach coreconf_client
+#   > store temperature 22.5    ← PUT /c — inicializa el datastore
+#   > ipatch 30 humidity        ← iPATCH /c — añade nodo humedad
+#   > ipatch 31 60.5            ← iPATCH /c — añade valor humedad
+#   > get                       ← GET /c   — ve temperature Y humidity
+#   > fetch 20 31               ← FETCH /c — solo esos dos SIDs
+# ─────────────────────────────────────────────────────────────
+
 services:
 
-  # ── Gateway CORECONF unificado ──────────────────────────────────────────────
-  # Acepta: FETCH, GET, iPATCH, PUT, DELETE en /c
-  # Acceso desde host: coap://localhost:5683/c
-  coreconf_gateway:
+  # ── Servidor CORECONF — datastore único en /c ────────────────────────────
+  coreconf_server:
     image: iot-coreconf
-    container_name: coreconf_gateway
-    hostname: gateway
+    container_name: coreconf_server
+    hostname: server
     ports:
       - "5683:5683/udp"
     networks:
@@ -19,42 +33,24 @@ services:
       - ./logs:/iot_device/logs
     restart: unless-stopped
 
-  # ── Dispositivo IoT 1 — sensor de temperatura (CLI interactivo) ─────────────
-  # Conectar: docker attach coreconf_device_1
+  # ── Cliente CORECONF — REPL interactivo ─────────────────────────────────
+  # Conectar: docker attach coreconf_client
   # Salir sin matar el contenedor: Ctrl-P Ctrl-Q
-  coreconf_device_1:
+  coreconf_client:
     image: iot-coreconf
-    container_name: coreconf_device_1
-    hostname: device-temp
+    container_name: coreconf_client
+    hostname: client
     stdin_open: true
     tty: true
     environment:
-      - GATEWAY_HOST=172.20.0.10
-      - GATEWAY_PORT=5683
+      - SERVER_HOST=172.20.0.10
+      - SERVER_PORT=5683
     networks:
       iot_network:
         ipv4_address: 172.20.0.11
-    command: ./iot_apps/coreconf_cli temperature sensor-temp-001
+    command: ./iot_apps/coreconf_cli temperature
     depends_on:
-      - coreconf_gateway
-
-  # ── Dispositivo IoT 2 — sensor de humedad (CLI interactivo) ─────────────────
-  # Conectar: docker attach coreconf_device_2
-  coreconf_device_2:
-    image: iot-coreconf
-    container_name: coreconf_device_2
-    hostname: device-humidity
-    stdin_open: true
-    tty: true
-    environment:
-      - GATEWAY_HOST=172.20.0.10
-      - GATEWAY_PORT=5683
-    networks:
-      iot_network:
-        ipv4_address: 172.20.0.12
-    command: ./iot_apps/coreconf_cli humidity sensor-hum-001
-    depends_on:
-      - coreconf_gateway
+      - coreconf_server
 
 networks:
   iot_network:
