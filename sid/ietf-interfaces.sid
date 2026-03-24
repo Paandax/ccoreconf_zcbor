@@ -1,0 +1,55 @@
+{
+  "ietf-sid-file:sid-file": {
+    "module-name": "ietf-interfaces",
+    "module-revision": "2018-02-20",
+    "description": "Minimal SID subset for CORECONF runtime loading (TFG)",
+    "assignment-range": [
+      {
+        "entry-point": "1500",
+        "size": "500"
+      }
+    ],
+    "item": [
+      {
+        "namespace": "module",
+        "identifier": "ietf-interfaces",
+        "sid": "1500"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/ietf-interfaces:interfaces/interface",
+        "sid": "1533"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/ietf-interfaces:interfaces/interface/description",
+        "sid": "1534"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/ietf-interfaces:interfaces/interface/enabled",
+        "sid": "1535"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/ietf-interfaces:interfaces/interface/name",
+        "sid": "1537"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/ietf-interfaces:interfaces/interface/type",
+        "sid": "1538"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/ietf-interfaces:interfaces/interface/oper-status",
+        "sid": "1544"
+      },
+      {
+        "namespace": "identity",
+        "identifier": "ethernetCsmacd",
+        "sid": "1880"
+      }
+    ]
+  }
+}

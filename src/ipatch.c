@@ -239,98 +239,108 @@ int apply_ipatch_raw(CoreconfValueT *datastore, const uint8_t *data, size_t len)
 {
     if (!datastore || datastore->type != CORECONF_HASHMAP || !data || len == 0) return -1;
 
-    zcbor_state_t state[8];
-    zcbor_new_decode_state(state, 8, data, len, 1, NULL, 0);
-
-    if (!zcbor_map_start_decode(state)) return -1;
-
     int count = 0;
-    while (!zcbor_array_at_end(state)) {
-        zcbor_major_type_t key_type = ZCBOR_MAJOR_TYPE(*state->payload);
+    const uint8_t *ptr     = data;
+    const uint8_t *end_ptr = data + len;
 
-        if (key_type == ZCBOR_MAJOR_TYPE_PINT) {
-            /* ── Clave uint: { SID: valor } ── */
-            uint64_t sid = 0;
-            if (!zcbor_uint64_decode(state, &sid)) break;
-            CoreconfValueT *val = cborToCoreconfValue(state, 0);
-            if (!val) break;
+    /* cbor-seq: puede haber varios mapas concatenados (draft §3.2.3) */
+    while (ptr < end_ptr) {
+        size_t remaining = (size_t)(end_ptr - ptr);
+        zcbor_state_t state[8];
+        zcbor_new_decode_state(state, 8, ptr, remaining, 1, NULL, 0);
 
-            if (val->type == CORECONF_NULL) {
-                deleteFromCoreconfHashMap(datastore->data.map_value, sid);
-                freeCoreconf(val, true);
-                printf("[iPATCH] deleted SID %"PRIu64"\n", sid);
-            } else {
-                /* Si el valor existente es una lista y el nuevo valor es un mapa,
-                 * envolverlo en un array para mantener el tipo lista */
-                CoreconfValueT *existing = getCoreconfHashMap(datastore->data.map_value, sid);
-                if (existing && existing->type == CORECONF_ARRAY && val->type == CORECONF_HASHMAP) {
-                    CoreconfValueT *arr = createCoreconfArray();
-                    addToCoreconfArray(arr, val);
-                    free(val);
-                    val = arr;
-                }
-                insertCoreconfHashMap(datastore->data.map_value, sid, val);
-                printf("[iPATCH] updated SID %"PRIu64"\n", sid);
-            }
-            count++;
+        if (!zcbor_map_start_decode(state)) break;
 
-        } else if (key_type == ZCBOR_MAJOR_TYPE_LIST) {
-            /* ── Clave array: { [SID, "key"]: valor } (instance-identifier) ── */
-            if (!zcbor_list_start_decode(state)) break;
+        while (!zcbor_array_at_end(state)) {
+            zcbor_major_type_t key_type = ZCBOR_MAJOR_TYPE(*state->payload);
 
-            uint64_t sid = 0;
-            if (!zcbor_uint64_decode(state, &sid)) { zcbor_list_end_decode(state); break; }
+            if (key_type == ZCBOR_MAJOR_TYPE_PINT) {
+                /* ── Clave uint: { SID: valor } ── */
+                uint64_t sid = 0;
+                if (!zcbor_uint64_decode(state, &sid)) goto next_map;
+                CoreconfValueT *val = cborToCoreconfValue(state, 0);
+                if (!val) goto next_map;
 
-            char key_str[128] = {0};
-            if (ZCBOR_MAJOR_TYPE(*state->payload) == ZCBOR_MAJOR_TYPE_TSTR) {
-                struct zcbor_string zs;
-                if (!zcbor_tstr_decode(state, &zs)) { zcbor_list_end_decode(state); break; }
-                size_t klen = zs.len < 127 ? zs.len : 127;
-                memcpy(key_str, zs.value, klen);
-                key_str[klen] = '\0';
-            } else {
-                zcbor_list_end_decode(state);
-                break;
-            }
-
-            if (!zcbor_list_end_decode(state)) break;
-
-            CoreconfValueT *val = cborToCoreconfValue(state, 0);
-            if (!val) break;
-
-            CoreconfValueT *list = getCoreconfHashMap(datastore->data.map_value, sid);
-            if (list && list->type == CORECONF_ARRAY) {
-                int idx = find_list_entry_by_key(list, key_str);
                 if (val->type == CORECONF_NULL) {
-                    if (idx >= 0) {
-                        remove_array_entry(list, (size_t)idx);
-                        printf("[iPATCH] deleted list entry [%"PRIu64", \"%s\"]\n", sid, key_str);
-                    }
+                    deleteFromCoreconfHashMap(datastore->data.map_value, sid);
                     freeCoreconf(val, true);
+                    printf("[iPATCH] deleted SID %"PRIu64"\n", sid);
                 } else {
-                    if (idx >= 0) {
-                        /* Reemplazar entrada existente */
-                        freeCoreconf(&list->data.array_value->elements[idx], false);
-                        list->data.array_value->elements[idx] = *val;
+                    /* Si el valor existente es una lista y el nuevo valor es un mapa,
+                     * envolverlo en un array para mantener el tipo lista */
+                    CoreconfValueT *existing = getCoreconfHashMap(datastore->data.map_value, sid);
+                    if (existing && existing->type == CORECONF_ARRAY && val->type == CORECONF_HASHMAP) {
+                        CoreconfValueT *arr = createCoreconfArray();
+                        addToCoreconfArray(arr, val);
                         free(val);
-                        printf("[iPATCH] updated list entry [%"PRIu64", \"%s\"]\n", sid, key_str);
-                    } else {
-                        /* Añadir nueva entrada */
-                        addToCoreconfArray(list, val);
-                        free(val);
-                        printf("[iPATCH] added list entry [%"PRIu64", \"%s\"]\n", sid, key_str);
+                        val = arr;
                     }
+                    insertCoreconfHashMap(datastore->data.map_value, sid, val);
+                    printf("[iPATCH] updated SID %"PRIu64"\n", sid);
                 }
                 count++;
-            } else {
-                freeCoreconf(val, true);
-            }
 
-        } else {
-            break;
+            } else if (key_type == ZCBOR_MAJOR_TYPE_LIST) {
+                /* ── Clave array: { [SID, "key"]: valor } (instance-identifier) ── */
+                if (!zcbor_list_start_decode(state)) goto next_map;
+
+                uint64_t sid = 0;
+                if (!zcbor_uint64_decode(state, &sid)) { zcbor_list_end_decode(state); goto next_map; }
+
+                char key_str[128] = {0};
+                if (ZCBOR_MAJOR_TYPE(*state->payload) == ZCBOR_MAJOR_TYPE_TSTR) {
+                    struct zcbor_string zs;
+                    if (!zcbor_tstr_decode(state, &zs)) { zcbor_list_end_decode(state); goto next_map; }
+                    size_t klen = zs.len < 127 ? zs.len : 127;
+                    memcpy(key_str, zs.value, klen);
+                    key_str[klen] = '\0';
+                } else {
+                    zcbor_list_end_decode(state);
+                    goto next_map;
+                }
+
+                if (!zcbor_list_end_decode(state)) goto next_map;
+
+                CoreconfValueT *val = cborToCoreconfValue(state, 0);
+                if (!val) goto next_map;
+
+                CoreconfValueT *list = getCoreconfHashMap(datastore->data.map_value, sid);
+                if (list && list->type == CORECONF_ARRAY) {
+                    int idx = find_list_entry_by_key(list, key_str);
+                    if (val->type == CORECONF_NULL) {
+                        if (idx >= 0) {
+                            remove_array_entry(list, (size_t)idx);
+                            printf("[iPATCH] deleted list entry [%"PRIu64", \"%s\"]\n", sid, key_str);
+                        }
+                        freeCoreconf(val, true);
+                    } else {
+                        if (idx >= 0) {
+                            /* Reemplazar entrada existente */
+                            freeCoreconf(&list->data.array_value->elements[idx], false);
+                            list->data.array_value->elements[idx] = *val;
+                            free(val);
+                            printf("[iPATCH] updated list entry [%"PRIu64", \"%s\"]\n", sid, key_str);
+                        } else {
+                            /* Añadir nueva entrada */
+                            addToCoreconfArray(list, val);
+                            free(val);
+                            printf("[iPATCH] added list entry [%"PRIu64", \"%s\"]\n", sid, key_str);
+                        }
+                    }
+                    count++;
+                } else {
+                    freeCoreconf(val, true);
+                }
+
+            } else {
+                goto next_map;
+            }
         }
+        next_map:
+        zcbor_map_end_decode(state);
+        /* Avanzar ptr al siguiente ítem del cbor-seq */
+        ptr = state[0].payload;
     }
-    zcbor_map_end_decode(state);
     return count;
 }
 

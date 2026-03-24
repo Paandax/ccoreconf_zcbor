@@ -1,0 +1,15 @@
+{
+  "ietf-sid-file:sid-file": {
+    "module-name": "ietf-comi-notification",
+    "module-revision": "2021-01-01",
+    "description": "SID file for COMI notification example (draft)",
+    "assignment-range": [
+      { "entry-point": "60010", "size": "3" }
+    ],
+    "item": [
+      { "namespace": "notification", "identifier": "/ietf-comi-notification:notification", "sid": "60010" },
+      { "namespace": "leaf", "identifier": "/ietf-comi-notification:notification/port-name", "sid": "60011" },
+      { "namespace": "leaf", "identifier": "/ietf-comi-notification:notification/port-fault", "sid": "60012" }
+    ]
+  }
+}

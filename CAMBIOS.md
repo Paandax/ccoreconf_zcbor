@@ -118,3 +118,143 @@ SID 1756     → [
   }
 ]
 ```
+
+---
+
+## 9. Endurecimiento DTLS en Docker (CERT/PSK)
+
+**Ficheros:** `iot_containers/Dockerfile`, `iot_containers/docker-compose.yml`, `iot_containers/certs/generate_certs.sh`, `iot_containers/iot_apps/coreconf_server.c`, `iot_containers/iot_apps/coreconf_cli.c`
+
+Se dejó la ejecución en contenedores preparada para CoAPS real:
+
+- Imagen Docker copia `sid/` y `certs/` dentro del contenedor.
+- Build de apps enlaza backend libcoap con prioridad DTLS (`openssl` -> `gnutls` -> `notls`).
+- Exposición de puertos UDP `5683` y `5684`.
+- `docker-compose` configurado con modo `CORECONF_TLS_MODE=cert` y cliente apuntando a `5684`.
+- Generación de certificados mejorada (CA + server + client) con SAN/CN/KU/EKU válidos para entorno Docker.
+- Cliente/servidor aceptan tanto modo certificados como PSK por variables de entorno.
+
+Resultado: transporte DTLS operativo end-to-end entre `coreconf_client` y `coreconf_server`.
+
+---
+
+## 10. Carga runtime de SID files y verificación de compatibilidad CLI<->Server
+
+**Ficheros:** `iot_containers/iot_apps/coreconf_server.c`, `iot_containers/iot_apps/coreconf_cli.c`, `sid/ietf-system.sid`, `sid/ietf-interfaces.sid`
+
+Se eliminó dependencia de SIDs fijos compilados para el flujo principal:
+
+- Server y CLI cargan en runtime `sid/ietf-system.sid` y `sid/ietf-interfaces.sid`.
+- Se parsean SIDs críticos del ejemplo (`clock`, `interfaces`, `ntp`, etc.).
+- Se calcula un fingerprint de diccionario SID (hash FNV-like) en ambos extremos.
+- Endpoint `GET /sid` en servidor devuelve `sid-fingerprint=<u64>`.
+- CLI compara fingerprint local vs remoto antes de operar; aborta si no coincide.
+
+Objetivo: evitar que cliente y servidor trabajen con mapeos SID incompatibles sin detectarlo.
+
+---
+
+## 11. Nuevo recurso de stream `/s` con CoAP Observe
+
+**Ficheros:** `iot_containers/iot_apps/coreconf_server.c`, `iot_containers/iot_apps/coreconf_cli.c`
+
+Se implementó el stream de eventos CORECONF en línea con draft (`rt="core.c.es"`):
+
+- Recurso `/s` registrado en servidor como observable.
+- `GET /s` soporta Observe (`Observe=0`) y devuelve `CF=142`.
+- Cola circular de eventos en memoria (`STREAM_MAX_EVENTS=16`), más nuevo primero.
+- Notificaciones push al cambiar datastore (PUT/iPATCH/DELETE).
+- CLI añade comando `observe [segundos]` para suscripción y recepción de notificaciones.
+
+Se validó que tras un `iPATCH` el cliente recibe notificación asíncrona con código `2.05` y payload de evento.
+
+---
+
+## 12. Ajuste de semántica de stream: de snapshot a cambio real
+
+**Fichero:** `iot_containers/iot_apps/coreconf_server.c`
+
+Refactor para acercar `/s` al modelo de notificación del draft:
+
+- Antes: se encolaban snapshots del datastore completo para cada cambio.
+- Ahora:
+  - `iPATCH` encola el payload recibido (cambio aplicado).
+  - `PUT` encola el body aplicado.
+  - `DELETE` encola evento vacío `{}`.
+
+Con esto, el stream representa mejor "instancias de notificación" y no únicamente estado total repetido.
+
+---
+
+## 13. `FETCH /s` con filtro real por SID (CF=141)
+
+**Fichero:** `iot_containers/iot_apps/coreconf_server.c`
+
+Implementación nueva para filtros en stream:
+
+- Se parsea payload `CF=141` como cbor-seq de IIDs (SID simple o `[SID, key]`).
+- Se extraen SIDs base y se filtran eventos de la cola por presencia de esas claves SID.
+- Si payload con filtro es inválido, se responde `4.00` con error payload CORECONF.
+- Si `CF` no es `141` en `FETCH /s` con body, se responde `4.15`.
+
+Nota: para IID compuesto `[SID,key]` el filtrado actual usa el SID base (no matching fino por key todavía).
+
+---
+
+## 14. Nuevo comando CLI `sfetch` para validar stream filtrado
+
+**Fichero:** `iot_containers/iot_apps/coreconf_cli.c`
+
+Comando añadido:
+
+- `sfetch <SID> [SID...] [[SID,clave]...]`
+
+Comportamiento:
+
+- Envía `FETCH /s` con payload `CF=141` (IIDs) y `Accept=142`.
+- Muestra cbor-seq devuelto por stream igual que otros comandos de lectura.
+
+Motivo: facilitar pruebas reproducibles de filtro de stream sin herramientas externas.
+
+---
+
+## 15. Validaciones ejecutadas durante la sesión
+
+### Build y despliegue
+
+- Build de imagen Docker completado sin errores.
+- Recreación de `coreconf_server` y `coreconf_client` correcta.
+
+### Prueba funcional Observe
+
+- Suscripción con `observe 8` / `observe 10`.
+- Tras enviar `iPATCH`, recepción de notificación en cliente confirmada.
+
+### Prueba funcional de filtro `FETCH /s`
+
+Secuencia probada:
+
+1. `ipatch 1755 true`
+2. `ipatch 20 42`
+3. `sfetch 1755` -> devuelve solo evento con SID `1755`.
+4. `sfetch 9999` -> respuesta `2.05` sin payload (sin coincidencias).
+
+Conclusión: filtro de stream por SID operativo.
+
+---
+
+## 16. Estado actual (resumen rápido)
+
+### Hecho
+
+- DTLS por certificados funcionando en Docker.
+- Carga runtime de SID files + comprobación de compatibilidad cliente/servidor.
+- Stream `/s` observable implementado.
+- Filtro `FETCH /s` por SID base implementado y validado.
+- CLI con `observe` y `sfetch` para demo y pruebas.
+
+### Parcial / pendiente para "clavado" total del draft
+
+- Matching estricto de IID compuesto por key (`[SID,key]`) en filtro de stream.
+- Refinar el formato final de "notification-instance" para eventos complejos.
+- Tabla de conformidad final por secciones del draft (si se quiere dejar cerrada en memoria TFG).

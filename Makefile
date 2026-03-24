@@ -71,6 +71,10 @@ clean:
 	rm -rf $(LIB_NAME).a $(OBJ_DIR) $(EXEC_NAME)
 	rm -f $(EXAMPLES_DIR)/test_migration $(EXAMPLES_DIR)/test_fetch_simple $(EXAMPLES_DIR)/test_exhaustive
 
+# Regenerate include/sids.h from sid/*.sid files
+sids:
+	python3 tools/generate_sids_header.py
+
 # Phony target to prevent conflicts with files of the same name
-.PHONY: clean examples
+.PHONY: clean examples sids
 

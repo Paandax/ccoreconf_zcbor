@@ -25,6 +25,8 @@ WORKDIR /iot_device
 COPY include/ ./include/
 COPY src/ ./src/
 COPY coreconf_zcbor_generated/ ./coreconf_zcbor_generated/
+COPY sid/ ./sid/
+COPY iot_containers/certs/ ./certs/
 COPY Makefile ./
 
 # Copiar aplicaciones IoT específicas
@@ -39,9 +41,12 @@ RUN cd iot_apps && \
     sed -i 's|"../../coreconf_zcbor_generated/|"|g' *.c
 
 # Compilar aplicaciones CORECONF (draft-ietf-core-comi-20)
-# Ubuntu 22.04 libcoap3-dev instala con sufijo -lcoap-3-notls
-RUN COAP_LIBS=$(pkg-config --libs libcoap-3-notls 2>/dev/null || echo "-lcoap-3-notls") && \
-    COAP_INC=$(pkg-config --cflags libcoap-3-notls 2>/dev/null || echo "") && \
+# Preferir backend con DTLS: openssl -> gnutls -> notls (fallback)
+RUN COAP_PKG=$(pkg-config --exists libcoap-3-openssl && echo libcoap-3-openssl || \
+               (pkg-config --exists libcoap-3-gnutls && echo libcoap-3-gnutls || echo libcoap-3-notls)) && \
+    COAP_LIBS=$(pkg-config --libs "$COAP_PKG" 2>/dev/null || echo "-lcoap-3-notls") && \
+    COAP_INC=$(pkg-config --cflags "$COAP_PKG" 2>/dev/null || echo "") && \
+    echo "Usando backend libcoap: $COAP_PKG" && \
     echo "Usando flags: $COAP_INC $COAP_LIBS" && \
     cd iot_apps && \
     gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated $COAP_INC \
@@ -49,8 +54,9 @@ RUN COAP_LIBS=$(pkg-config --libs libcoap-3-notls 2>/dev/null || echo "-lcoap-3-
     gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated $COAP_INC \
         coreconf_cli.c ../ccoreconf.a $COAP_LIBS -pthread -o coreconf_cli
 
-# Puerto CoAP
+# Puertos CoAP / CoAPS
 EXPOSE 5683/udp
+EXPOSE 5684/udp
 
 # Por defecto, ejecutar el servidor CORECONF
 CMD ["./iot_apps/coreconf_server"]

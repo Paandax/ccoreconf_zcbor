@@ -25,10 +25,13 @@ services:
     hostname: server
     ports:
       - "5683:5683/udp"
+      - "5684:5684/udp"
     networks:
       iot_network:
         ipv4_address: 172.20.0.10
     command: ./iot_apps/coreconf_server
+    environment:
+      - CORECONF_TLS_MODE=cert
     volumes:
       - ./logs:/iot_device/logs
     restart: unless-stopped
@@ -44,7 +47,8 @@ services:
     tty: true
     environment:
       - SERVER_HOST=172.20.0.10
-      - SERVER_PORT=5683
+      - SERVER_PORT=5684
+      - CORECONF_TLS_MODE=cert
     networks:
       iot_network:
         ipv4_address: 172.20.0.11

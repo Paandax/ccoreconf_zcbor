@@ -24,10 +24,10 @@
 #include <time.h>
 #include <signal.h>
 
-#include "../../include/coreconfTypes.h"
-#include "../../include/serialization.h"
-#include "../../include/get.h"
-#include "../../include/delete.h"
+#include "coreconfTypes.h"
+#include "serialization.h"
+#include "get.h"
+#include "delete.h"
 #include "../../coreconf_zcbor_generated/zcbor_encode.h"
 #include "../../coreconf_zcbor_generated/zcbor_decode.h"
 
