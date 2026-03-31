@@ -1,5 +1,7 @@
 # ccoreconf_zcbor — Implementación de CORECONF (RFC 9254)
 
+> **English version coming soon!** > *Please note that this repository and its documentation are currently in Spanish as it is part of my Final Degree Project (TFG). A complete English translation of the README, comments, and technical documentation will be uploaded shortly to make it accessible to the broader IoT community.*
+
 Este repositorio es parte de mi TFG. El objetivo es implementar el protocolo **CORECONF** (RFC 9254) para gestión de dispositivos IoT usando CoAP como transporte y CBOR como formato de serialización.
 
 La idea es que en redes IoT no puedes usar HTTP+JSON como en internet normal porque los dispositivos tienen poca RAM, baterías limitadas y las redes son poco fiables. CORECONF resuelve esto usando CoAP (un HTTP ligero sobre UDP) y CBOR (un JSON binario mucho más compacto).
