@@ -1,0 +1,17 @@
+{
+  "ietf-sid-file:sid-file": {
+    "module-name": "ietf-coreconf-actions",
+    "module-revision": "2026-04-07",
+    "description": "SID file for CORECONF POST RPC/action examples",
+    "assignment-range": [
+      { "entry-point": "60000", "size": "1200" }
+    ],
+    "item": [
+      { "namespace": "data", "identifier": "/ietf-coreconf-actions:reset", "sid": "60002" },
+      { "namespace": "data", "identifier": "/ietf-coreconf-actions:reset/input/reset-at", "sid": "1" },
+      { "namespace": "data", "identifier": "/ietf-coreconf-actions:reset/output/reset-finished-at", "sid": "2" },
+      { "namespace": "data", "identifier": "/ietf-coreconf-actions:reboot", "sid": "61000" },
+      { "namespace": "data", "identifier": "/ietf-coreconf-actions:reboot/input/delay", "sid": "1" }
+    ]
+  }
+}

@@ -1,3 +1,4 @@
+/* SID utilities: dynamic lists, key mappings, and identifier lookup helpers. */
 #include "../include/sid.h"
 
 #include <errno.h>
@@ -9,7 +10,6 @@
 #include "../include/hashmap.h"
 
 #define SID_LENGTH 20
-// Array of string representations for the enum values
 const char *SchemaIdentifierTypeStrings[] = {"String",
                                              "Unsigned Integer 8bit",
                                              "Unsigned Integer 16bit",
@@ -33,47 +33,35 @@ DynamicLongListT *createDynamicLongList(void) {
 }
 
 void initializeDynamicLongList(DynamicLongListT *dynamicLongList) {
-    // If its NULL, do nothing;
     if (!dynamicLongList) return;
     dynamicLongList->longList = malloc(sizeof(long));
     dynamicLongList->size = 0;
 }
 
-// Comparison function for qsort
 int compareLong(const void *a, const void *b) { return (*(int *)a - *(int *)b); }
 
-// Function to sort the dynamic long list, it assumes sortedArray is already correctly inititliazed to
-// dynamicLongList->size
 void sortDynamicLongList(DynamicLongListT *dynamicLongList, long sortedArray[]) {
-    // populate the sortedArray with dynamicLongList values
     for (size_t i = 0; i < dynamicLongList->size; i++) {
         sortedArray[i] = dynamicLongList->longList[i];
     }
 
-    // Sort the array
     qsort(sortedArray, dynamicLongList->size, sizeof(long), compareLong);
-    // Add the sorted array to the sortedDynamicLongList
 }
 
-// Function to compare two dynamicLongList which converts to a sorted long array and then compares the array
 bool compareDynamicLongList(DynamicLongListT *dynamicLongList1, DynamicLongListT *dynamicLongList2) {
     size_t array1Size = dynamicLongList1->size;
     size_t array2Size = dynamicLongList2->size;
 
-    // Check if either of the dynamicLongLists have size = 0
     if ((array1Size == 0) || (array2Size == 0)) return false;
 
     if (array1Size != array2Size) return false;
 
-    // Created two long arrays for sorting with size of dynamicLongLists
     long array1[array1Size];
     long array2[array1Size];
 
-    // sort the two dynamicLongLists
     sortDynamicLongList(dynamicLongList1, array1);
     sortDynamicLongList(dynamicLongList2, array2);
 
-    // Compare the two arrays, and return true if array1 is exactly the same as array2
     for (size_t i = 0; i < array1Size; i++) {
         if (array1[i] != array2[i]) return false;
     }
@@ -90,7 +78,6 @@ void addLong(DynamicLongListT *dynamicLongList, long value) {
     }
 
     dynamicLongList->longList = (long *)realloc(dynamicLongList->longList, (currentListSize + 1) * sizeof(long));
-    // Check if realloc happened properly, if no, then realloc failed and longList will be NULL
     if (!dynamicLongList->longList) {
         fprintf(stderr, "Failed realloc'ing long list");
         return;
@@ -99,11 +86,8 @@ void addLong(DynamicLongListT *dynamicLongList, long value) {
     dynamicLongList->longList[currentListSize] = value;
 }
 
-// pop the last value from dynamicLongList
 long popLong(DynamicLongListT *dynamicLongList) {
-    // If its NULL, then do nothing
     if (!dynamicLongList) return 0;
-    // If the list is empty, then return -1
     if (dynamicLongList->size == 0) return 0;
     long lastValue = dynamicLongList->longList[dynamicLongList->size - 1];
     dynamicLongList->longList = (long *)realloc(dynamicLongList->longList, (dynamicLongList->size - 1) * sizeof(long));
@@ -111,21 +95,16 @@ long popLong(DynamicLongListT *dynamicLongList) {
     return lastValue;
 }
 
-// Clone a DynamicLongListT
 void cloneDynamicLongList(DynamicLongListT *originalDynamicLongList, DynamicLongListT *clonedDynamicLongList) {
-    // If its NULL, then do nothing
     if (originalDynamicLongList == NULL || originalDynamicLongList->size == 0) return;
 
-    // Initialize the clonedDynamicLongList
     initializeDynamicLongList(clonedDynamicLongList);
-    // Iterate over the originalDynamicLongList and add all the values to the clonedDynamicLongList
     for (size_t i = 0; i < originalDynamicLongList->size; i++) {
         addLong(clonedDynamicLongList, originalDynamicLongList->longList[i]);
     }
 }
 
 void addUniqueLong(DynamicLongListT *dynamicLongList, long value) {
-    // Check if the value already exists in the list
     for (size_t i = 0; i < dynamicLongList->size; i++) {
         if (dynamicLongList->longList[i] == value) {
             return;
@@ -135,7 +114,6 @@ void addUniqueLong(DynamicLongListT *dynamicLongList, long value) {
 }
 
 void printDynamicLongList(DynamicLongListT *dynamicLongList) {
-    // If its NULL, then print []
     if (!dynamicLongList) {
         printf("[]");
         return;
@@ -148,19 +126,16 @@ void printDynamicLongList(DynamicLongListT *dynamicLongList) {
 }
 
 void freeDynamicLongList(DynamicLongListT *dynamicLongList) {
-    // If its NULL, then do nothing
     if (!dynamicLongList) return;
     free(dynamicLongList->longList);
     free(dynamicLongList);
 }
 
 int keyMappingCompare(const void *a, const void *b, void *udata) {
-    // NOTE Keep it unused for compatibility reasons
     (void)udata;
 
     const KeyMappingT *keyMapping1 = (KeyMappingT *)a;
     const KeyMappingT *keyMapping2 = (KeyMappingT *)b;
-    // return strcmp(keyMapping1->key, keyMapping2->key);
     return (keyMapping1->key != keyMapping2->key);
 }
 
@@ -170,7 +145,6 @@ uint64_t keyMappingHash(const void *item, uint64_t seed0, uint64_t seed1) {
 }
 
 int identifierSIDCompare(const void *a, const void *b, void *udata) {
-    // NOTE Keep it unused for compatibility reasons
     (void)udata;
 
     const IdentifierSIDT *identifierSID1 = (IdentifierSIDT *)a;
@@ -184,7 +158,6 @@ uint64_t identifierSIDHash(const void *item, uint64_t seed0, uint64_t seed1) {
 }
 
 int sidIdentifierCompare(const void *a, const void *b, void *udata) {
-    // NOTE Keep it unused for compatibility reasons
     (void)udata;
 
     const SIDIdentifierT *sidIdentifier1 = (SIDIdentifierT *)a;
@@ -198,7 +171,6 @@ uint64_t sidIdentifierHash(const void *item, uint64_t seed0, uint64_t seed1) {
 }
 
 int identifierTypeCompare(const void *a, const void *b, void *udata) {
-    // NOTE Keep it unused for compatibility reasons
     (void)udata;
 
     const IdentifierTypeT *identifierType1 = (IdentifierTypeT *)a;
@@ -214,7 +186,6 @@ uint64_t identifierTypeHash(const void *item, uint64_t seed0, uint64_t seed1) {
 void printKeyMappingT(const KeyMappingT *keyMapping) {
     printf("\nFor the key %d: \n", (int)keyMapping->key);
 
-    // Iterate over DynamicLongListT
     for (size_t i = 0; i < keyMapping->dynamicLongList->size; i++) {
         long childSID = *(keyMapping->dynamicLongList->longList + i);
         printf("%lu, ", childSID);
@@ -276,24 +247,19 @@ void printHashMap(struct hashmap *anyHashMap, enum HashMapTypeEnum hashmapType) 
     }
 }
 
-/*
-Convert char* to int64_t, return INTMAX_MIN in case of an error
-*/
+
 int64_t char2int64(char *keyString) {
-    // Convert char* to int64_t using strtoimax
     intmax_t intValue = strtoimax(keyString, NULL, 10);
     if (intValue == INTMAX_MIN || intValue == INTMAX_MAX) {
         fprintf(stderr, "Conversion error or out of range");
         return INTMAX_MIN;
     }
 
-    // Check for valid conversion
     if (errno == ERANGE) {
         fprintf(stderr, "Value out of range");
         return INTMAX_MIN;
     }
 
-    // Convert intmax_t to int64_t
     int64_t int64Value = (int64_t)intValue;
 
     return int64Value;
@@ -306,26 +272,21 @@ char *int2str(char *keyString, int64_t keyInt64) {
         return NULL;
     }
 
-    // Allocate memory for the char* string
     keyString = (char *)malloc((keyStringLength + 1) * sizeof(char));
     if (keyString == NULL) {
         fprintf(stderr, "Memory allocation failed");
         return NULL;
     }
 
-    // Convert uint64_t to char*
     snprintf(keyString, keyStringLength + 1, "%d ", (int)keyInt64);
     return keyString;
 }
 
 void removeTrailingSlashFromPath(const char *qualifiedPath, char *formattedPath) {
-    /*
-    Remove the trailing '/' character, assumes formattedPath is initialized properly
-    */
+    
     size_t len = strlen(qualifiedPath);
 
     if (qualifiedPath[len - 1] == '/') {
-        // Copy all characters except the last one to the new string.
         strncpy(formattedPath, qualifiedPath, len - 1);
         formattedPath[len - 1] = '\0';  // Add null-terminator.
 
@@ -335,15 +296,12 @@ void removeTrailingSlashFromPath(const char *qualifiedPath, char *formattedPath)
     }
 }
 
-// Used it in coreconf to find the SID of a given identifier
 char *getSubstringAfterLastColon(const char *input) {
     char *lastColon = strrchr(input, ':');
 
     if (lastColon != NULL) {
-        // Return the substring after the last ':'
         return lastColon + 1;
     } else {
-        // If ':' is not found, return the original string
         return (char *)input;
     }
 }

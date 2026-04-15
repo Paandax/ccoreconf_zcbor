@@ -1,71 +1,4 @@
-// INCLUDES ESTÁNDAR Y LIBCOAP
-#include <coap3/coap.h>
-#include <dirent.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-/* Compat: libcoap3-dev de Ubuntu 22.04 puede usar nombres distintos */
-#ifndef COAP_LOG_WARN
-#define COAP_LOG_WARN 4
-#endif
-#ifndef COAP_LOG_ERR
-#define COAP_LOG_ERR  3
-#endif
-#include <unistd.h>
-#include <inttypes.h>
-#include <time.h>
-#include <arpa/inet.h>
-#include <ctype.h>
-
-#include "../../include/coreconfTypes.h"
-#include "../../include/serialization.h"
-#include "../../include/fetch.h"
-#include "../../include/get.h"
-#include "../../include/ipatch.h"
-#include "../../include/put.h"
-#include "../../include/delete.h"
-#include "../../include/sids.h"
-#include "../../coreconf_zcbor_generated/zcbor_encode.h"
-#include "../../coreconf_zcbor_generated/zcbor_decode.h"
-/**
- * coreconf_cli.c - Cliente CORECONF interactivo (draft-ietf-core-comi)
- *
- * REPL: escribe comandos y los ejecuta contra el servidor.
- *
- * COMANDOS:
- *   store  <tipo> [valor]     → PUT /c  — carga datastore inicial
- *   fetch  <SID> [SID...]     → FETCH /c — leer SIDs concretos
- *   sfetch <SID> [SID...]      → FETCH /s — leer stream filtrado por SID
- *   get                       → GET /c   — leer datastore completo
- *   ipatch <SID> <valor>      → iPATCH /c — actualizar un SID (ID en payload)
- *   put    <SID> <valor> ...  → PUT /c   — reemplazar datastore
- *   delete [SID [SID...]]     → DELETE /c — borrar datastore; SIDs via iPATCH null
- *   help                      → mostrar ayuda
- *   quit / exit               → salir
- *
- * COMPILAR:
- *   cd iot_containers/iot_apps && make coreconf_cli
- *
- * DOCKER (interactivo):
- *   docker attach coreconf_client
- *   > store temperature 22.5
- *   > get
- *   > ipatch 20 99.9
- *   > delete
- *
- * PROTOCOLO (draft-ietf-core-comi-20):
- *   - Un servidor CORECONF tiene UN ÚNICO datastore en /c
- *   - El datastore puede tener nodos para temperatura, humedad, etc.
- *   - PUT /c  → inicializar/reemplazar datastore completo (CF=140)
- *   - FETCH /c → seleccionar SIDs específicos (CF=141 req, CF=142 resp)
- *   - GET /c   → datastore completo SIN parámetros de query
- *   - iPATCH /c → actualizar SIDs; el identificador va en el PAYLOAD (CF=142)
- *   - POST /c  → solo para RPC/acciones (no para datos)
- *   - DELETE /c → borrar datastore completo
- */
-
-
-// INCLUDES ESTÁNDAR AL PRINCIPIO
+/* Interactive CORECONF CLI client over CoAP/CoAPS using libcoap. */
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,10 +8,9 @@
 #include <time.h>
 #include <arpa/inet.h>
 #include <ctype.h>
-
-// COAP Y RESTO DE INCLUDES
 #include <coap3/coap.h>
-/* Compat: libcoap3-dev de Ubuntu 22.04 puede usar nombres distintos */
+#include <netdb.h>
+
 #ifndef COAP_LOG_WARN
 #define COAP_LOG_WARN 4
 #endif
@@ -91,6 +23,7 @@
 #include "../../include/fetch.h"
 #include "../../include/get.h"
 #include "../../include/ipatch.h"
+#include "../../include/post.h"
 #include "../../include/put.h"
 #include "../../include/delete.h"
 #include "../../include/sids.h"
@@ -100,21 +33,17 @@
 #define BUFFER_SIZE 4096
 #define MAX_ARGS    32
 
-/* Content-Format values (draft-ietf-core-comi-20)
- * 140 = application/yang-data+cbor;id=sid          (datastore completo)
- * 141 = application/yang-identifiers+cbor-seq      (lista de SIDs — FETCH req)
- * 142 = application/yang-instances+cbor-seq        (mapa SID→valor — FETCH resp, iPATCH req)
- */
+
 #define CF_YANG_DATA_CBOR    140
 #define CF_YANG_IDENTIFIERS  141
 #define CF_YANG_INSTANCES    142
 
-/* ── Estado global CoAP ── */
+
 static coap_context_t  *g_ctx     = NULL;
 static coap_session_t  *g_session = NULL;
 static char             g_device_type[64] = "temperature";
 
-/* ── Respuesta ── */
+
 static int             g_response_received = 0;
 static uint8_t         g_response_buf[BUFFER_SIZE];
 static size_t          g_response_len      = 0;
@@ -122,6 +51,7 @@ static coap_pdu_code_t g_response_code;
 static int             g_observe_mode      = 0;
 
 static void print_datastore(const uint8_t *data, size_t len);
+static void print_post_response(const uint8_t *data, size_t len);
 
 typedef struct RuntimeSystemSids {
     uint64_t module;
@@ -152,6 +82,23 @@ typedef struct RuntimeInterfacesSids {
 static RuntimeSystemSidsT g_sys_sids = {0};
 static RuntimeInterfacesSidsT g_if_sids = {0};
 
+typedef struct RuntimeOperationSids {
+    uint64_t reboot_rpc_sid;
+    uint64_t reboot_input_delay;
+    uint64_t reset_action_sid;
+    uint64_t reset_input_reset_at;
+    uint64_t reset_output_finished_at;
+    int loaded;
+} RuntimeOperationSidsT;
+
+static RuntimeOperationSidsT g_ops_sids = {0};
+
+#define DEFAULT_RPC_REBOOT_SID              61000ULL
+#define DEFAULT_RPC_REBOOT_INPUT_DELAY      1ULL
+#define DEFAULT_ACTION_RESET_SID            60002ULL
+#define DEFAULT_ACTION_RESET_INPUT_RESET_AT 1ULL
+#define DEFAULT_ACTION_RESET_OUTPUT_FINISHED_AT 2ULL
+
 static uint64_t sid_hash_mix_u64(uint64_t hash, uint64_t value) {
     hash ^= value;
     hash *= 1099511628211ULL;
@@ -159,7 +106,8 @@ static uint64_t sid_hash_mix_u64(uint64_t hash, uint64_t value) {
 }
 
 static uint64_t compute_sid_fingerprint(const RuntimeSystemSidsT *sys,
-                                        const RuntimeInterfacesSidsT *ifs) {
+                                        const RuntimeInterfacesSidsT *ifs,
+                                        const RuntimeOperationSidsT *ops) {
     uint64_t h = 1469598103934665603ULL;
     h = sid_hash_mix_u64(h, sys->module);
     h = sid_hash_mix_u64(h, sys->clock);
@@ -179,11 +127,16 @@ static uint64_t compute_sid_fingerprint(const RuntimeSystemSidsT *sys,
     h = sid_hash_mix_u64(h, ifs->iface_type);
     h = sid_hash_mix_u64(h, ifs->iface_oper_status);
     h = sid_hash_mix_u64(h, ifs->identity_ethernet_csmacd);
+    h = sid_hash_mix_u64(h, ops->reboot_rpc_sid);
+    h = sid_hash_mix_u64(h, ops->reboot_input_delay);
+    h = sid_hash_mix_u64(h, ops->reset_action_sid);
+    h = sid_hash_mix_u64(h, ops->reset_input_reset_at);
+    h = sid_hash_mix_u64(h, ops->reset_output_finished_at);
     return h;
 }
 
 static int check_server_sid_compatibility(void) {
-    uint64_t local_fp = compute_sid_fingerprint(&g_sys_sids, &g_if_sids);
+    uint64_t local_fp = compute_sid_fingerprint(&g_sys_sids, &g_if_sids, &g_ops_sids);
 
     coap_pdu_t *pdu = coap_new_pdu(COAP_MESSAGE_CON, COAP_REQUEST_CODE_GET, g_session);
     coap_add_option(pdu, COAP_OPTION_URI_PATH, 3, (uint8_t *)"sid");
@@ -192,7 +145,7 @@ static int check_server_sid_compatibility(void) {
     g_response_len = 0;
     coap_mid_t mid = coap_send(g_session, pdu);
     if (mid == COAP_INVALID_MID) {
-        fprintf(stderr, "[SID] CLI: error enviando GET /sid\n");
+        fprintf(stderr, "[SID] CLI: error sending GET /sid. (Check if DTLS failed)\n");
         return -1;
     }
 
@@ -202,7 +155,7 @@ static int check_server_sid_compatibility(void) {
         waited += 100;
     }
     if (!g_response_received || g_response_len == 0) {
-        fprintf(stderr, "[SID] CLI: timeout/empty response en GET /sid\n");
+        fprintf(stderr, "[SID] CLI: timeout/empty response on GET /sid\n");
         return -1;
     }
 
@@ -213,7 +166,7 @@ static int check_server_sid_compatibility(void) {
 
     uint64_t remote_fp = 0;
     if (sscanf(payload, "sid-fingerprint=%" SCNu64, &remote_fp) != 1) {
-        fprintf(stderr, "[SID] CLI: formato inválido en /sid: %s\n", payload);
+        fprintf(stderr, "[SID] CLI: invalid format on /sid: %s\n", payload);
         return -1;
     }
 
@@ -221,10 +174,10 @@ static int check_server_sid_compatibility(void) {
     printf("[SID] Server fingerprint=%" PRIu64 "\n", remote_fp);
 
     if (local_fp != remote_fp) {
-        fprintf(stderr, "[SID] CLI FATAL: diccionario SID incompatible con el servidor\n");
+        fprintf(stderr, "[SID] CLI FATAL: SID dictionary incompatible with server\n");
         return -1;
     }
-    printf("[SID] compatibilidad cliente/servidor OK\n");
+    printf("[SID] client/server SID compatibility OK\n");
     return 0;
 }
 
@@ -301,7 +254,7 @@ static int load_runtime_system_sids(RuntimeSystemSidsT *out) {
     if (load_text_from_candidates(candidates,
                                   sizeof(candidates) / sizeof(candidates[0]),
                                   &text, &chosen) != 0) {
-        fprintf(stderr, "[SID] CLI: no se encontró ietf-system.sid\n");
+        fprintf(stderr, "[SID] CLI: ietf-system.sid not found\n");
         return -1;
     }
 
@@ -320,12 +273,12 @@ static int load_runtime_system_sids(RuntimeSystemSidsT *out) {
     free(text);
 
     if (ok != 0) {
-        fprintf(stderr, "[SID] CLI: error parseando SIDs críticos en %s\n", chosen);
+        fprintf(stderr, "[SID] CLI: error parsing critical SIDs in %s\n", chosen);
         return -1;
     }
 
     out->loaded = 1;
-    printf("[SID] CLI cargado %s\n", chosen);
+    printf("[SID] CLI loaded %s\n", chosen);
     return 0;
 }
 
@@ -345,7 +298,7 @@ static int load_runtime_interfaces_sids(RuntimeInterfacesSidsT *out) {
     if (load_text_from_candidates(candidates,
                                   sizeof(candidates) / sizeof(candidates[0]),
                                   &text, &chosen) != 0) {
-        fprintf(stderr, "[SID] CLI: no se encontró ietf-interfaces.sid\n");
+        fprintf(stderr, "[SID] CLI: ietf-interfaces.sid not found\n");
         return -1;
     }
 
@@ -362,23 +315,66 @@ static int load_runtime_interfaces_sids(RuntimeInterfacesSidsT *out) {
     free(text);
 
     if (ok != 0) {
-        fprintf(stderr, "[SID] CLI: error parseando SIDs críticos en %s\n", chosen);
+        fprintf(stderr, "[SID] CLI: error parsing critical SIDs in %s\n", chosen);
         return -1;
     }
 
     out->loaded = 1;
-    printf("[SID] CLI cargado %s\n", chosen);
+    printf("[SID] CLI loaded %s\n", chosen);
     return 0;
 }
 
-/* ══════════════════════════════════════════════════════════
- * Helpers CoAP
- * ════════════════════════════════════════════════════════*/
+static int load_runtime_operation_sids(RuntimeOperationSidsT *out) {
+    if (!out) return -1;
+
+    const char *candidates[] = {
+        "sid/ietf-coreconf-actions.sid",
+        "../sid/ietf-coreconf-actions.sid",
+        "../../sid/ietf-coreconf-actions.sid",
+        "../../../sid/ietf-coreconf-actions.sid",
+        "/app/sid/ietf-coreconf-actions.sid",
+    };
+
+    char *text = NULL;
+    const char *chosen = NULL;
+    if (load_text_from_candidates(candidates,
+                                  sizeof(candidates) / sizeof(candidates[0]),
+                                  &text, &chosen) != 0) {
+        fprintf(stderr, "[SID] CLI warning: ietf-coreconf-actions.sid not found, using built-in POST SIDs\n");
+        out->reboot_rpc_sid = DEFAULT_RPC_REBOOT_SID;
+        out->reboot_input_delay = DEFAULT_RPC_REBOOT_INPUT_DELAY;
+        out->reset_action_sid = DEFAULT_ACTION_RESET_SID;
+        out->reset_input_reset_at = DEFAULT_ACTION_RESET_INPUT_RESET_AT;
+        out->reset_output_finished_at = DEFAULT_ACTION_RESET_OUTPUT_FINISHED_AT;
+        out->loaded = 1;
+        return 0;
+    }
+
+    int ok = 0;
+    ok |= parse_sid_after_identifier(text, "/ietf-coreconf-actions:reboot\"", &out->reboot_rpc_sid);
+    ok |= parse_sid_after_identifier(text, "/ietf-coreconf-actions:reboot/input/delay\"", &out->reboot_input_delay);
+    ok |= parse_sid_after_identifier(text, "/ietf-coreconf-actions:reset\"", &out->reset_action_sid);
+    ok |= parse_sid_after_identifier(text, "/ietf-coreconf-actions:reset/input/reset-at\"", &out->reset_input_reset_at);
+    ok |= parse_sid_after_identifier(text, "/ietf-coreconf-actions:reset/output/reset-finished-at\"", &out->reset_output_finished_at);
+
+    free(text);
+
+    if (ok != 0) {
+        fprintf(stderr, "[SID] CLI: error parsing POST operation SIDs in %s\n", chosen);
+        return -1;
+    }
+
+    out->loaded = 1;
+    printf("[SID] CLI loaded %s\n", chosen);
+    return 0;
+}
+
+
 static coap_response_t response_handler(coap_session_t *sess,
                                           const coap_pdu_t *sent,
                                           const coap_pdu_t *recv,
                                           const coap_mid_t mid) {
-    (void)sess; (void)sent; (void)mid; //No salten los warnings por parámetros no usados
+    (void)sess; (void)sent; (void)mid; // Silence unused-parameter warnings
 
     coap_opt_iterator_t oi;
     coap_opt_t *obs_opt = coap_check_option(recv, COAP_OPTION_OBSERVE, &oi);
@@ -401,23 +397,23 @@ static coap_response_t response_handler(coap_session_t *sess,
         if (g_response_len > 0) {
             print_datastore(g_response_buf, g_response_len);
         } else {
-            printf("    (stream sin payload)\n");
+            printf("    (stream without payload)\n");
         }
         printf("coreconf> ");
         fflush(stdout);
     }
 
-    g_response_received = 1; //Avisar a send_and_wait que llegó la respuesta
+    g_response_received = 1; // Notify send_and_wait that a response arrived
     return COAP_RESPONSE_OK;
 }
 
 static int send_and_wait(coap_pdu_t *pdu) {
-    g_response_received = 0; //Reiniciar flag y buffer
+    g_response_received = 0; // Reset response flag and payload buffer
     g_response_len      = 0;
     coap_mid_t mid = coap_send(g_session, pdu);
 
     if (mid == COAP_INVALID_MID) { 
-        printf(" Error enviando\n"); 
+        printf(" Send error\n"); 
         return 0; 
     }
     int w = 0;
@@ -432,11 +428,9 @@ static int send_and_wait(coap_pdu_t *pdu) {
     return 1;
 }
 
-/* ══════════════════════════════════════════════════════════
- * Mostrar datastore decodificado (con soporte para mapas/arrays anidados)
- * ════════════════════════════════════════════════════════*/
 
-/* Imprime cualquier CoreconfValueT de forma recursiva */
+
+
 static void print_value_r(CoreconfValueT *val, int depth) {
     if (!val) { printf("null"); return; }
     char indent[64] = "";
@@ -480,14 +474,14 @@ static void print_value_r(CoreconfValueT *val, int depth) {
             printf("%s]", indent);
             break;
         }
-        default: printf("(tipo %d)", val->type); break;
+        default: printf("(type %d)", val->type); break;
     }
 }
 
 static void print_datastore(const uint8_t *data, size_t len) {
     CoreconfValueT *ds = parse_get_response(data, len);
     if (!ds || ds->type != CORECONF_HASHMAP) {
-        printf("(error decodificando)\n");
+        printf("(decode error)\n");
         if (ds) freeCoreconf(ds, true);
         return;
     }
@@ -504,51 +498,126 @@ static void print_datastore(const uint8_t *data, size_t len) {
             shown++;
         }
     }
-    printf("    ── %zu nodo(s) raíz ──\n", shown);
+    printf("    ── %zu root node(s) ──\n", shown);
     freeCoreconf(ds, true);
 }
 
-/* ══════════════════════════════════════════════════════════
- * Parsear valor desde string al tipo más adecuado
- * ════════════════════════════════════════════════════════*/
-/* parse_value_ptr — parser recursivo que avanza el puntero *p.
- * Soporta: null, true, false, números, strings y mapas {k:v,k:v,...} anidados.
- * Los mapas usan claves uint (deltas YANG).
- */
+static void print_post_response(const uint8_t *data, size_t len) {
+    const uint8_t *ptr = data;
+    const uint8_t *end = data + len;
+    size_t shown = 0;
+
+    printf("\n");
+    while (ptr < end) {
+        zcbor_state_t dec[12];
+        zcbor_new_decode_state(dec, 12, ptr, (size_t)(end - ptr), 1, NULL, 0);
+
+        if (!zcbor_map_start_decode(dec) || zcbor_array_at_end(dec)) {
+            printf("    (decode error)\n");
+            return;
+        }
+
+        uint64_t sid = 0;
+        int key_is_iid = 0;
+        char iid_key[128] = {0};
+        zcbor_major_type_t key_mt = ZCBOR_MAJOR_TYPE(*dec[0].payload);
+
+        if (key_mt == ZCBOR_MAJOR_TYPE_PINT) {
+            if (!zcbor_uint64_decode(dec, &sid)) {
+                printf("    (decode error)\n");
+                return;
+            }
+        } else if (key_mt == ZCBOR_MAJOR_TYPE_LIST) {
+            struct zcbor_string zs;
+            if (!zcbor_list_start_decode(dec) ||
+                !zcbor_uint64_decode(dec, &sid) ||
+                !zcbor_tstr_decode(dec, &zs) ||
+                !zcbor_list_end_decode(dec)) {
+                printf("    (decode error)\n");
+                return;
+            }
+            size_t kl = zs.len < sizeof(iid_key) - 1 ? zs.len : sizeof(iid_key) - 1;
+            memcpy(iid_key, zs.value, kl);
+            iid_key[kl] = '\0';
+            key_is_iid = 1;
+        } else {
+            printf("    (decode error)\n");
+            return;
+        }
+
+        if (key_is_iid) {
+            printf("    [%" PRIu64 ",\"%s\"] : ", sid, iid_key);
+        } else {
+            printf("    %-8" PRIu64 " : ", sid);
+        }
+
+        if (zcbor_nil_expect(dec, NULL)) {
+            printf("null");
+        } else if (zcbor_map_start_decode(dec)) {
+            printf("{");
+            int first = 1;
+            while (!zcbor_array_at_end(dec)) {
+                uint64_t inner_sid = 0;
+                struct zcbor_string inner_str;
+                if (!zcbor_uint64_decode(dec, &inner_sid) || !zcbor_tstr_decode(dec, &inner_str)) {
+                    printf("(decode error)");
+                    return;
+                }
+                if (!first) printf(", ");
+                printf("%" PRIu64 ":\"%.*s\"", inner_sid, (int)inner_str.len, (const char *)inner_str.value);
+                first = 0;
+            }
+            if (!zcbor_map_end_decode(dec)) {
+                printf("(decode error)");
+                return;
+            }
+            printf("}");
+        } else {
+            printf("(unsupported value)");
+        }
+
+        if (!zcbor_array_at_end(dec) || !zcbor_map_end_decode(dec)) {
+            printf("\n    (decode error)\n");
+            return;
+        }
+
+        printf("\n");
+        ptr = dec[0].payload;
+        shown++;
+    }
+
+    printf("    -- %zu root node(s) --\n", shown);
+}
+
+
 static CoreconfValueT *parse_value_ptr(const char **p);
 
 static CoreconfValueT *parse_map_ptr(const char **p) {
-    /* Esperamos estar justo después de '{' */
     CoreconfValueT *map = createCoreconfHashmap();
     while (**p && **p != '}') {
-        /* saltar espacios y comas */
         while (**p == ' ' || **p == ',') (*p)++;
         if (**p == '}') break;
-        /* leer clave uint */
         char *ep;
         uint64_t key = (uint64_t)strtoull(*p, &ep, 10);
-        if (ep == *p) break;  /* no es número → error */
+        if (ep == *p) break;  
         *p = ep;
-        /* saltar ':' */
         while (**p == ' ') (*p)++;
         if (**p == ':') (*p)++;
         while (**p == ' ') (*p)++;
-        /* leer valor (recursivo) */
         CoreconfValueT *val = parse_value_ptr(p);
         if (val) insertCoreconfHashMap(map->data.map_value, key, val);
         while (**p == ' ') (*p)++;
     }
-    if (**p == '}') (*p)++;  /* consumir '}' */
+    if (**p == '}') (*p)++;  
     return map;
 }
 
 static CoreconfValueT *parse_value_ptr(const char **p) {
     while (**p == ' ') (*p)++;
     if (**p == '{') {
-        (*p)++;  /* consumir '{' */
+        (*p)++;  
         return parse_map_ptr(p);
     }
-    /* leer hasta el próximo ',' '}' o fin */
     const char *start = *p;
     while (**p && **p != ',' && **p != '}') (*p)++;
     size_t len = (size_t)(*p - start);
@@ -556,7 +625,6 @@ static CoreconfValueT *parse_value_ptr(const char **p) {
     if (len >= sizeof(buf)) len = sizeof(buf) - 1;
     memcpy(buf, start, len);
     buf[len] = '\0';
-    /* quitar espacios al final */
     while (len > 0 && buf[len-1] == ' ') buf[--len] = '\0';
 
     if (strcmp(buf, "null")  == 0) {
@@ -582,40 +650,7 @@ static CoreconfValueT *parse_value(const char *s) {
     return parse_value_ptr(&p);
 }
 
-/* ══════════════════════════════════════════════════════════
- * Comandos
- * ════════════════════════════════════════════════════════*/
 
-/* store <tipo> [valor]  |  store ietf-example
- * Inicializa el datastore via PUT /c (draft §3.3 — reemplaza el datastore completo).
- *
- * store ietf-example → carga el datastore exacto de los ejemplos del draft:
- *   §3.3.1 GET:   clock (SID 1721) + interface list (SID 1533)
- *   §3.1.3.1 FETCH: current-datetime (SID 1723), interface eth0 (SID 1533)
- *   §3.2.3.1 iPATCH NTP: enabled (SID 1755), server list (SID 1756)
- *
- * Módulo ietf-system  (RFC 7317, SIDs ~1700-1799):
- *   SID 1721 = /ietf-system:system-state/clock
- *   SID 1722 = .../clock/boot-datetime      delta=1
- *   SID 1723 = .../clock/current-datetime   delta=2
- *   SID 1755 = .../ntp/enabled
- *   SID 1756 = .../ntp/server
- *   SID 1759 = .../ntp/server/name          delta=3
- *   SID 1760 = .../ntp/server/prefer        delta=4
- *   SID 1761 = .../ntp/server/udp           delta=5
- *   SID 1762 = .../ntp/server/udp/address   delta=1
- *
- * Módulo ietf-interfaces (RFC 8343, SIDs ~1500-1599):
- *   SID 1533 = /ietf-interfaces:interfaces/interface
- *   SID 1534 = .../interface/description    delta=1
- *   SID 1535 = .../interface/enabled        delta=2
- *   SID 1537 = .../interface/name           delta=4  (key)
- *   SID 1538 = .../interface/type           delta=5  (identity)
- *   SID 1544 = .../interface/oper-status    delta=11
- *   SID 1880 = identity ethernetCsmacd
- *
- * Encoding RFC 9254: claves en mapas anidados = delta relativo al SID padre.
- */
 static void cmd_store(int argc, char **argv) {
     const char *tipo = (argc >= 1) ? argv[0] : g_device_type;
     double valor     = (argc >= 2) ? atof(argv[1]) : 22.5;
@@ -627,7 +662,7 @@ static void cmd_store(int argc, char **argv) {
 
     if (strcmp(tipo, "ietf-example") == 0) {
         if (!g_sys_sids.loaded || !g_if_sids.loaded) {
-            printf("  Error: diccionario SID runtime no cargado\n");
+            printf("  Error: runtime SID dictionary not loaded\n");
             freeCoreconf(data, true);
             return;
         }
@@ -644,48 +679,31 @@ static void cmd_store(int argc, char **argv) {
         uint64_t delta_ntp_udp       = g_sys_sids.ntp_server_udp - g_sys_sids.ntp_server;
         uint64_t delta_ntp_udp_addr  = g_sys_sids.ntp_server_udp_address - g_sys_sids.ntp_server_udp;
 
-        /* ─────────────────────────────────────────────────────────
-         * Datastore exacto del draft-ietf-core-comi-20 §3.3.1
-         * ─────────────────────────────────────────────────────────
-         * REF GET response:
-         *  { 1721: { 2:"2016-10-26T12:16:31Z",  <- current-datetime (1723-1721=2)
-         *            1:"2014-10-05T09:00:00Z" }, <- boot-datetime    (1722-1721=1)
-         *    1533: [{ 4:"eth0",                  <- name    (1537-1533=4)
-         *             1:"Ethernet adaptor",      <- description (1534-1533=1)
-         *             5: 1880,                   <- type = ethernetCsmacd (1538-1533=5)
-         *             2: true,                   <- enabled (1535-1533=2)
-         *            11: 3 }] }                  <- oper-status=testing (1544-1533=11)
-         * ─────────────────────────────────────────────────────────*/
-
-        /* clock container: SID(runtime) → {DELTA_CURRENT, DELTA_BOOT} */
         CoreconfValueT *clock_c = createCoreconfHashmap();
         insertCoreconfHashMap(clock_c->data.map_value, delta_clock_current,
-            createCoreconfString("2016-10-26T12:16:31Z")); /* current-datetime */
+            createCoreconfString("2016-10-26T12:16:31Z")); 
         insertCoreconfHashMap(clock_c->data.map_value, delta_clock_boot,
-            createCoreconfString("2014-10-05T09:00:00Z")); /* boot-datetime */
+            createCoreconfString("2014-10-05T09:00:00Z")); 
         insertCoreconfHashMap(map, g_sys_sids.clock, clock_c);
 
-        /* interface list: SID(runtime) → [{name,description,type,enabled,oper-status}] */
         CoreconfValueT *iface = createCoreconfHashmap();
         insertCoreconfHashMap(iface->data.map_value, delta_if_name,
-            createCoreconfString("eth0"));              /* name */
+            createCoreconfString("eth0"));              
         insertCoreconfHashMap(iface->data.map_value, delta_if_desc,
-            createCoreconfString("Ethernet adaptor")); /* description */
+            createCoreconfString("Ethernet adaptor")); 
         insertCoreconfHashMap(iface->data.map_value, delta_if_type,
-            createCoreconfUint64(g_if_sids.identity_ethernet_csmacd)); /* type = ethernetCsmacd */
+            createCoreconfUint64(g_if_sids.identity_ethernet_csmacd)); 
         insertCoreconfHashMap(iface->data.map_value, delta_if_enabled,
-            createCoreconfBoolean(true));              /* enabled */
+            createCoreconfBoolean(true));              
         insertCoreconfHashMap(iface->data.map_value, delta_if_oper,
-            createCoreconfUint64(3));                  /* oper-status = 3 (testing) */
+            createCoreconfUint64(3));                  
         CoreconfValueT *ifaces = createCoreconfArray();
         addToCoreconfArray(ifaces, iface);
-        free(iface); /* addToCoreconfArray copia el struct; liberar la envoltura */
+        free(iface); 
         insertCoreconfHashMap(map, g_if_sids.iface, ifaces);
 
-        /* ntp/enabled: SID(runtime) → false  (para demo iPATCH §3.2.3.1) */
         insertCoreconfHashMap(map, g_sys_sids.ntp_enabled, createCoreconfBoolean(false));
 
-        /* ntp/server list: SID(runtime) → [{name,prefer,udp:{address}}] */
         CoreconfValueT *udp = createCoreconfHashmap();
         insertCoreconfHashMap(udp->data.map_value, delta_ntp_udp_addr,
             createCoreconfString("128.100.49.105"));
@@ -700,7 +718,6 @@ static void cmd_store(int argc, char **argv) {
         free(srv);
         insertCoreconfHashMap(map, g_sys_sids.ntp_server, servers);
     } else {
-        /* Datastore simple con SIDs arbitrarios (sensor) */
         insertCoreconfHashMap(map, 10, createCoreconfString(tipo));
         insertCoreconfHashMap(map, 11, createCoreconfUint64((uint64_t)time(NULL)));
         insertCoreconfHashMap(map, 20, createCoreconfReal(valor));
@@ -714,8 +731,6 @@ static void cmd_store(int argc, char **argv) {
     size_t len = (size_t)(enc[0].payload - buf);
     freeCoreconf(data, true);
 
-    /* PUT /c — sin parámetros de query (draft §3.3)
-     * CF=140 (application/yang-data+cbor;id=sid) */
     coap_pdu_t *pdu = coap_new_pdu(COAP_MESSAGE_CON, COAP_REQUEST_CODE_PUT, g_session);
     coap_add_option(pdu, COAP_OPTION_URI_PATH, 1, (uint8_t *)"c");
     uint8_t cf[4]; size_t cfl = coap_encode_var_safe(cf, sizeof(cf), CF_YANG_DATA_CBOR);
@@ -729,39 +744,27 @@ static void cmd_store(int argc, char **argv) {
 
     if (send_and_wait(pdu)) {
         if (strcmp(tipo, "ietf-example") == 0)
-                 printf("datastore ietf-example cargado (clock %" PRIu64 ", ifaces %" PRIu64 ", ntp %" PRIu64 "/%" PRIu64 ")\n",
+                 printf("ietf-example datastore loaded (clock %" PRIu64 ", ifaces %" PRIu64 ", ntp %" PRIu64 "/%" PRIu64 ")\n",
                      g_sys_sids.clock, g_if_sids.iface, g_sys_sids.ntp_enabled, g_sys_sids.ntp_server);
         else
-            printf("datastore inicializado con SIDs 10,11,20,21\n");
+            printf("datastore initialized with SIDs 10,11,20,21\n");
     }
 }
 
-/* fetch <SID> [SID ...] [[SID,key] ...]
- * FETCH /c — sin parámetros de query (draft §3.1.3)
- * CF=141 (yang-identifiers+cbor-seq): lista de instance-identifiers en el payload
- * Accept=142 (yang-instances+cbor-seq): el servidor responde con mapa SID→valor
- *
- * Soporta instance-identifiers con clave de lista (draft §3.1.3.1):
- *   fetch 1723              → SID simple (leaf)
- *   fetch [1533,eth0]       → lista instance [SID,"key"] para list instance
- *   fetch 1723 [1533,eth0]  → combinación (ejemplo exacto del draft §3.1.3.1)
- */
 static void cmd_fetch(int argc, char **argv) {
     if (argc == 0) {
-        printf("  Uso: fetch <SID> [SID...] [[SID,clave]...]\n");
-        printf("  Ej:  fetch 1723 [1533,eth0]  (ejemplo §3.1.3.1 del draft)\n");
+        printf("  Usage: fetch <SID> [SID...] [[SID,key]...]\n");
+        printf("  Ex:  fetch 1723 [1533,eth0]  (ejemplo §3.1.3.1 del draft)\n");
         return;
     }
 
-    /* Construir array de InstanceIdentifier (soporta SID simple y [SID,"key"]) */
     InstanceIdentifier iids[64]; int n = 0;
     for (int i = 0; i < argc && i < 64; i++) {
         if (argv[i][0] == '[') {
-            /* Formato [SID,key] — modificar argv[i] in-place (es mutable) */
-            char *p = argv[i] + 1;   /* saltar '[' */
+            char *p = argv[i] + 1;   
             char *comma = strchr(p, ',');
             if (!comma) {
-                printf("  Error: se esperaba [SID,clave], recibido: %s\n", argv[i]);
+                printf("  Error: expected [SID,key], received: %s\n", argv[i]);
                 return;
             }
             *comma = '\0';
@@ -770,7 +773,7 @@ static void cmd_fetch(int argc, char **argv) {
             if (kl > 0 && key[kl - 1] == ']') key[kl - 1] = '\0';
             iids[n].type        = IID_WITH_STR_KEY;
             iids[n].sid         = strtoull(p, NULL, 10);
-            iids[n].key.str_key = key;  /* apunta a argv[i], válido durante la llamada */
+            iids[n].key.str_key = key;  
             n++;
         } else {
             iids[n].type        = IID_SIMPLE;
@@ -783,13 +786,10 @@ static void cmd_fetch(int argc, char **argv) {
     uint8_t buf[BUFFER_SIZE];
     size_t  len = create_fetch_request_with_iids(buf, BUFFER_SIZE, iids, (size_t)n);
 
-    /* FETCH /c — sin query params (draft §3.1.3) */
     coap_pdu_t *pdu = coap_new_pdu(COAP_MESSAGE_CON, COAP_REQUEST_CODE_FETCH, g_session);
     coap_add_option(pdu, COAP_OPTION_URI_PATH, 1, (uint8_t *)"c");
-    /* CF=141: lista de identificadores de nodo */
     uint8_t cf[4]; size_t cfl = coap_encode_var_safe(cf, sizeof(cf), CF_YANG_IDENTIFIERS);
     coap_add_option(pdu, COAP_OPTION_CONTENT_FORMAT, cfl, cf);
-    /* Accept=142: instancias (mapa SID→valor) */
     uint8_t acc[4]; size_t accl = coap_encode_var_safe(acc, sizeof(acc), CF_YANG_INSTANCES);
     coap_add_option(pdu, COAP_OPTION_ACCEPT, accl, acc);
     coap_add_data(pdu, len, buf);
@@ -798,17 +798,13 @@ static void cmd_fetch(int argc, char **argv) {
     if (send_and_wait(pdu) && g_response_len > 0)
         print_datastore(g_response_buf, g_response_len);
     else if (g_response_len == 0)
-        printf("sin payload\n");
+        printf("no payload\n");
     (void)accl;
 }
 
-/* sfetch <SID> [SID ...] [[SID,key] ...]
- * FETCH /s con filtro opcional de instance-identifiers (CF=141).
- * Respuesta CF=142 con cbor-seq de notificaciones (más nueva primero).
- */
 static void cmd_sfetch(int argc, char **argv) {
     if (argc == 0) {
-        printf("  Uso: sfetch <SID> [SID...] [[SID,clave]...]\n");
+        printf("  Usage: sfetch <SID> [SID...] [[SID,key]...]\n");
         return;
     }
 
@@ -818,7 +814,7 @@ static void cmd_sfetch(int argc, char **argv) {
             char *p = argv[i] + 1;
             char *comma = strchr(p, ',');
             if (!comma) {
-                printf("  Error: se esperaba [SID,clave], recibido: %s\n", argv[i]);
+                printf("  Error: expected [SID,key], received: %s\n", argv[i]);
                 return;
             }
             *comma = '\0';
@@ -852,40 +848,27 @@ static void cmd_sfetch(int argc, char **argv) {
     if (send_and_wait(pdu) && g_response_len > 0)
         print_datastore(g_response_buf, g_response_len);
     else if (g_response_len == 0)
-        printf("stream sin payload\n");
+        printf("stream without payload\n");
     (void)accl;
 }
 
-/* get
- * GET /c — sin parámetros de query (draft §3.3)
- * Recupera el datastore COMPLETO. No lleva identificadores.
- */
 static void cmd_get(void) {
     coap_pdu_t *pdu = coap_new_pdu(COAP_MESSAGE_CON, COAP_REQUEST_CODE_GET, g_session);
     coap_add_option(pdu, COAP_OPTION_URI_PATH, 1, (uint8_t *)"c");
-    /* Sin query params — draft §3.3: GET recupera el datastore completo */
 
     printf("  GET /c... ");
     if (send_and_wait(pdu)) {
         if (g_response_len > 0)
             print_datastore(g_response_buf, g_response_len);
         else
-            printf("sin payload\n");
+            printf("no payload\n");
     }
 }
 
-/* ipatch <SID> <valor>
- * ipatch [SID,clave] <valor>   ← instance-identifier (lista YANG)
- * iPATCH /c — sin parámetros de query (draft §3.2.3)
- * El identificador de nodo (SID) va en el PAYLOAD, no en la URL.
- * CF=142 (yang-instances+cbor-seq): mapa {SID: valor} o {[SID,"key"]: valor}
- * Para borrar un nodo: ipatch <SID> null
- * Para borrar una instancia de lista: ipatch [SID,clave] null
- */
 static void cmd_ipatch(int argc, char **argv) {
     if (argc < 2) {
-        printf("  Uso: ipatch <SID> <valor>\n");
-        printf("  Uso: ipatch [SID,clave] null|<valor>\n");
+        printf("  Usage: ipatch <SID> <value>\n");
+        printf("  Usage: ipatch [SID,key] null|<value>\n");
         return;
     }
 
@@ -894,14 +877,13 @@ static void cmd_ipatch(int argc, char **argv) {
     coap_pdu_t *pdu = NULL;
 
     if (argv[0][0] == '[') {
-        /* ── Instance-identifier: [SID,clave] ── */
         char tmp[256];
         strncpy(tmp, argv[0] + 1, sizeof(tmp) - 1);
         tmp[sizeof(tmp) - 1] = '\0';
         char *closing = strchr(tmp, ']');
         if (closing) *closing = '\0';
         char *comma = strchr(tmp, ',');
-        if (!comma) { printf("  Error: formato esperado [SID,clave]\n"); return; }
+        if (!comma) { printf("  Error: expected format [SID,key]\n"); return; }
         *comma = '\0';
         uint64_t sid = strtoull(tmp, NULL, 10);
         const char *key_str = comma + 1;
@@ -920,7 +902,6 @@ static void cmd_ipatch(int argc, char **argv) {
         printf("  iPATCH /c ([%"PRIu64",%s] = %s)... ", sid, key_str, argv[1]);
 
     } else {
-        /* ── SID simple ── */
         uint64_t sid = strtoull(argv[0], NULL, 10);
         CoreconfValueT *val = parse_value(argv[1]);
 
@@ -941,15 +922,97 @@ static void cmd_ipatch(int argc, char **argv) {
     if (send_and_wait(pdu)) printf("\n");
 }
 
-/* demo
- * Reproduce los ejemplos exactos del draft-ietf-core-comi-20:
- *   §3.3.1  GET/PUT  datastore  (clock + interface)
- *   §3.1.3.1 FETCH   con current-datetime y eth0
- *   §3.2.3.1 iPATCH  NTP  (3 entradas: set enabled, delete server, add server)
- */
+static void cmd_post(int argc, char **argv) {
+    if (argc < 1) {
+        printf("  Usage: post reboot [delay-seconds]\n");
+        printf("  Usage: post reset <server-name> <reset-at-rfc3339>\n");
+        return;
+    }
+
+    uint8_t buf[BUFFER_SIZE];
+    size_t len = 0;
+    const char *op = argv[0];
+
+    if (strcmp(op, "reboot") == 0) {
+        if (argc > 2) {
+            printf("  Usage: post reboot [delay-seconds]\n");
+            return;
+        }
+
+        uint64_t delay = 0;
+        if (argc == 2) {
+            char *endp = NULL;
+            delay = strtoull(argv[1], &endp, 10);
+            if (!endp || *endp != '\0') {
+                printf("  Error: delay must be an unsigned integer.\n");
+                return;
+            }
+        }
+
+        CoreconfValueT *input = createCoreconfHashmap();
+        if (!input) {
+            printf("  Error: out of memory.\n");
+            return;
+        }
+        insertCoreconfHashMap(input->data.map_value, g_ops_sids.reboot_input_delay, createCoreconfUint64(delay));
+        len = create_post_request_rpc(buf, BUFFER_SIZE, g_ops_sids.reboot_rpc_sid, input);
+        freeCoreconf(input, true);
+
+        if (len == 0) {
+            printf("  Error: failed to encode reboot RPC payload.\n");
+            return;
+        }
+        printf("  POST /c reboot(delay=%" PRIu64 ")... ", delay);
+
+    } else if (strcmp(op, "reset") == 0) {
+        if (argc != 3) {
+            printf("  Usage: post reset <server-name> <reset-at-rfc3339>\n");
+            return;
+        }
+
+        const char *server_name = argv[1];
+        const char *reset_at = argv[2];
+        CoreconfValueT *input = createCoreconfHashmap();
+        insertCoreconfHashMap(input->data.map_value, g_ops_sids.reset_input_reset_at, createCoreconfString(reset_at));
+        len = create_ipatch_iid_request(buf, BUFFER_SIZE, g_ops_sids.reset_action_sid, server_name, input);
+        freeCoreconf(input, true);
+
+        if (len == 0) {
+            printf("  Error: failed to encode reset action payload.\n");
+            return;
+        }
+
+        printf("  POST /c reset(server=%s)... ", server_name);
+
+    } else {
+        printf("  Unknown post operation: %s\n", op);
+        printf("  Supported operations: reboot, reset\n");
+        return;
+    }
+
+    coap_pdu_t *pdu = coap_new_pdu(COAP_MESSAGE_CON, COAP_REQUEST_CODE_POST, g_session);
+    coap_add_option(pdu, COAP_OPTION_URI_PATH, 1, (uint8_t *)"c");
+
+    uint8_t cf[4];
+    size_t cfl = coap_encode_var_safe(cf, sizeof(cf), CF_YANG_INSTANCES);
+    coap_add_option(pdu, COAP_OPTION_CONTENT_FORMAT, cfl, cf);
+
+    uint8_t acc[4];
+    size_t accl = coap_encode_var_safe(acc, sizeof(acc), CF_YANG_INSTANCES);
+    coap_add_option(pdu, COAP_OPTION_ACCEPT, accl, acc);
+    coap_add_data(pdu, len, buf);
+
+    if (send_and_wait(pdu)) {
+        if (g_response_len > 0)
+            print_post_response(g_response_buf, g_response_len);
+        else
+            printf("no payload\n");
+    }
+}
+
 static void cmd_demo(void) {
     if (!g_sys_sids.loaded || !g_if_sids.loaded) {
-        printf("\n[SID] Error: diccionario SID runtime no cargado en CLI\n\n");
+        printf("\n[SID] Error: runtime SID dictionary not loaded in CLI\n\n");
         return;
     }
 
@@ -959,24 +1022,24 @@ static void cmd_demo(void) {
     uint64_t delta_ntp_udp_addr = g_sys_sids.ntp_server_udp_address - g_sys_sids.ntp_server_udp;
 
     printf("\n╔══════════════════════════════════════════════════════════════╗\n");
-    printf("║  DEMO: Ejemplos exactos draft-ietf-core-comi-20              ║\n");
+    printf("║  DEMO: Exact draft-ietf-core-comi-20 examples              ║\n");
     printf("╚══════════════════════════════════════════════════════════════╝\n\n");
 
-    printf("── PASO 1: store ietf-example  (§3.3.1 PUT /c) ─────────────────\n");
+    printf("── STEP 1: store ietf-example  (§3.3.1 PUT /c) ─────────────────\n");
     char *store_args[] = {"ietf-example"};
     cmd_store(1, store_args);
     printf("\n");
 
-    printf("── PASO 2: GET /c — datastore completo  (§3.3.1) ───────────────\n");
-    printf("  Respuesta servidor:\n");
+    printf("── STEP 2: GET /c — full datastore  (§3.3.1) ───────────────────\n");
+    printf("  Server response:\n");
     cmd_get();
     printf("\n");
 
-    printf("── PASO 3: FETCH /c  (§3.1.3.1) ────────────────────────────────\n");
+    printf("── STEP 3: FETCH /c  (§3.1.3.1) ────────────────────────────────\n");
     printf("  REQ payload (yang-identifiers+cbor-seq):\n");
     printf("    %" PRIu64 ",             / current-datetime /\n", g_sys_sids.clock_current);
     printf("    [%" PRIu64 ", \"eth0\"]   / interface con name=\"eth0\" /\n", g_if_sids.iface);
-    printf("  Respuesta servidor:\n");
+    printf("  Server response:\n");
     {
         char fa0[32];
         char fa1[64];
@@ -987,13 +1050,13 @@ static void cmd_demo(void) {
     }
     printf("\n");
 
-    printf("── PASO 4: iPATCH /c  (§3.2.3.1 — NTP) ────────────────────────\n");
+    printf("── STEP 4: iPATCH /c  (§3.2.3.1 — NTP) ────────────────────────\n");
     printf("  REQ payload (yang-instances+cbor-seq, 3 mapas):\n");
     printf("    { %" PRIu64 ": true }                        set ntp/enabled\n", g_sys_sids.ntp_enabled);
-    printf("    { [%" PRIu64 ", \"tac.nrc.ca\"]: null }       borrar servidor NTP\n", g_sys_sids.ntp_server);
+    printf("    { [%" PRIu64 ", \"tac.nrc.ca\"]: null }       remove NTP server\n", g_sys_sids.ntp_server);
     printf("    { %" PRIu64 ": { %" PRIu64 ":\"tic.nrc.ca\", %" PRIu64 ":true,\n",
            g_sys_sids.ntp_server, delta_ntp_name, delta_ntp_prefer);
-    printf("               %" PRIu64 ":{ %" PRIu64 ":\"132.246.11.231\" } } añadir servidor NTP\n",
+    printf("               %" PRIu64 ":{ %" PRIu64 ":\"132.246.11.231\" } } add NTP server\n",
            delta_ntp_udp, delta_ntp_udp_addr);
     {
         uint8_t buf[BUFFER_SIZE];
@@ -1036,7 +1099,7 @@ static void cmd_demo(void) {
         zcbor_map_end_encode(enc, 1);
         offset += (size_t)(enc[0].payload - (buf + offset));
 
-        printf("  Payload total: %zu bytes (3 mapas concatenados en cbor-seq)\n", offset);
+        printf("  Total payload: %zu bytes (3 concatenated maps in cbor-seq)\n", offset);
         printf("  iPATCH /c... ");
         coap_pdu_t *pdu = coap_new_pdu(COAP_MESSAGE_CON, COAP_REQUEST_CODE_IPATCH, g_session);
         coap_add_option(pdu, COAP_OPTION_URI_PATH, 1, (uint8_t *)"c");
@@ -1048,21 +1111,16 @@ static void cmd_demo(void) {
     }
     printf("\n");
 
-    printf("── PASO 5: GET /c — verificación post-iPATCH ───────────────────\n");
-    printf("  ntp/enabled (SID %" PRIu64 ") debe ser true\n", g_sys_sids.ntp_enabled);
-    printf("  ntp/server  (SID %" PRIu64 ") debe contener tic.nrc.ca con address 132.246.11.231\n", g_sys_sids.ntp_server);
+    printf("── STEP 5: GET /c — post-iPATCH verification ───────────────────\n");
+    printf("  ntp/enabled (SID %" PRIu64 ") must be true\n", g_sys_sids.ntp_enabled);
+    printf("  ntp/server  (SID %" PRIu64 ") must contain tic.nrc.ca con address 132.246.11.231\n", g_sys_sids.ntp_server);
     cmd_get();
-    printf("\nDemo completado.\n\n");
+    printf("\nDemo completed.\n\n");
 }
 
-/* put <SID> <valor> [SID valor ...]
- * PUT /c — sin parámetros de query (draft §3.3)
- * Reemplaza el datastore completo.
- * CF=140 (yang-data+cbor;id=sid): mapa completo del datastore
- */
 static void cmd_put(int argc, char **argv) {
     if (argc < 2 || argc % 2 != 0) {
-        printf("  Uso: put <SID> <valor> [SID valor ...]\n"); return;
+        printf("  Usage: put <SID> <value> [SID value ...]\n"); return;
     }
 
     CoreconfValueT  *ds  = createCoreconfHashmap();
@@ -1076,8 +1134,6 @@ static void cmd_put(int argc, char **argv) {
     size_t  len = create_put_request(buf, BUFFER_SIZE, ds);
     freeCoreconf(ds, true);
 
-    /* PUT /c — sin query params (draft §3.3)
-     * CF=140: datastore completo */
     coap_pdu_t *pdu = coap_new_pdu(COAP_MESSAGE_CON, COAP_REQUEST_CODE_PUT, g_session);
     coap_add_option(pdu, COAP_OPTION_URI_PATH, 1, (uint8_t *)"c");
     uint8_t cf[4]; size_t cfl = coap_encode_var_safe(cf, sizeof(cf), CF_YANG_DATA_CBOR);
@@ -1088,36 +1144,24 @@ static void cmd_put(int argc, char **argv) {
     if (send_and_wait(pdu)) printf("\n");
 }
 
-/* delete
- * DELETE /c — sin parámetros de query (draft §3.3)
- * Borra el datastore COMPLETO.
- * Para borrar un SID individual, usa:  ipatch <SID> null
- */
 static void cmd_delete(int argc, char **argv) {
     if (argc > 0) {
-        /* El draft no define DELETE por SID individual en la URI.
-         * Usa iPATCH con valor null para borrar nodos específicos. */
-        printf("  AVISO: DELETE borra el datastore completo.\n");
-        printf("  Para borrar un SID concreto usa: ipatch <SID> null\n");
-        printf("  Continuar con DELETE /c completo? (s/N): ");
+        printf("  WARNING: DELETE removes the full datastore.\n");
+        printf("  To delete a specific SID use: ipatch <SID> null\n");
+        printf("  Continue with full DELETE /c? (y/N): ");
         char resp[8];
         if (!fgets(resp, sizeof(resp), stdin)) return;
-        if (resp[0] != 's' && resp[0] != 'S') { printf("  Cancelado.\n"); return; }
+        if (resp[0] != 'y' && resp[0] != 'Y') { printf("  Cancelled.\n"); return; }
     }
 
-    /* DELETE /c — sin query params (draft §3.3) */
     coap_pdu_t *pdu = coap_new_pdu(COAP_MESSAGE_CON, COAP_REQUEST_CODE_DELETE, g_session);
     coap_add_option(pdu, COAP_OPTION_URI_PATH, 1, (uint8_t *)"c");
 
-    printf("  DELETE /c (datastore completo)... ");
+    printf("  DELETE /c (full datastore)... ");
     if (send_and_wait(pdu)) printf("\n");
-    (void)argv; /* suprimir warning: argv no usado cuando argc==0 */
+    (void)argv; 
 }
 
-/* observe [segundos]
- * Suscribe el cliente al stream /s con GET Observe(0) y procesa notificaciones
- * durante N segundos (default 20).
- */
 static void cmd_observe(int argc, char **argv) {
     int secs = 20;
     if (argc >= 1) {
@@ -1127,9 +1171,7 @@ static void cmd_observe(int argc, char **argv) {
 
     coap_pdu_t *pdu = coap_new_pdu(COAP_MESSAGE_CON, COAP_REQUEST_CODE_GET, g_session);
     coap_add_option(pdu, COAP_OPTION_URI_PATH, 1, (uint8_t *)"s");
-    /* Observe register = 0 */
     coap_add_option(pdu, COAP_OPTION_OBSERVE, 0, NULL);
-    /* Esperamos instancias (CF=142) */
     uint8_t acc[4]; size_t accl = coap_encode_var_safe(acc, sizeof(acc), CF_YANG_INSTANCES);
     coap_add_option(pdu, COAP_OPTION_ACCEPT, accl, acc);
 
@@ -1141,7 +1183,7 @@ static void cmd_observe(int argc, char **argv) {
     coap_mid_t mid = coap_send(g_session, pdu);
     if (mid == COAP_INVALID_MID) {
         g_observe_mode = 0;
-        printf("Error enviando\n");
+        printf("Send error\n");
         return;
     }
 
@@ -1152,63 +1194,66 @@ static void cmd_observe(int argc, char **argv) {
     }
     if (!g_response_received) {
         g_observe_mode = 0;
-        printf("Timeout inicial\n");
+        printf("Initial timeout\n");
         return;
     }
     printf("%d.%02d\n", COAP_RESPONSE_CLASS(g_response_code), g_response_code & 0x1F);
     if (g_response_len > 0) print_datastore(g_response_buf, g_response_len);
 
-    printf("  Escuchando notificaciones de /s durante %d s...\n", secs);
+    printf("  Listening for /s notifications for %d s...\n", secs);
     int loops = secs * 10;
     while (loops-- > 0) {
         coap_io_process(g_ctx, 100);
     }
 
     g_observe_mode = 0;
-    printf("  Observe finalizado.\n");
+    printf("  Observe finished.\n");
 }
 
-/* ══════════════════════════════════════════════════════════
- * REPL
- * ════════════════════════════════════════════════════════*/
+
 static void print_help(void) {
-    printf("\n  Comandos disponibles (draft-ietf-core-comi-20):\n");
+    printf("\n  Available commands (draft-ietf-core-comi-20):\n");
     printf("  ───────────────────────────────────────────────────────────────────\n");
-    printf("  store  [tipo] [valor]         PUT /c  — inicializar datastore\n");
-    printf("  store  ietf-example           PUT /c  — ejemplo exacto del draft §3.3.1\n");
-    printf("  fetch  <SID> [SID...]         FETCH /c — leer SIDs concretos\n");
-    printf("  fetch  [SID,clave]            FETCH /c — list instance (draft §3.1.3.1)\n");
-    printf("  sfetch <SID> [SID...]         FETCH /s — stream filtrado por SID\n");
-    printf("  get                           GET /c  — datastore completo\n");
-    printf("  ipatch <SID> <valor>          iPATCH /c — actualizar SID (en payload)\n");
-    printf("  ipatch <SID> null             iPATCH /c — borrar un SID\n");
-    printf("  ipatch [SID,clave] null       iPATCH /c — borrar instancia de lista\n");
-    printf("  ipatch [SID,clave] <valor>    iPATCH /c — actualizar/añadir instancia\n");
-    printf("  put    <SID> <v> [SID <v>]    PUT /c  — reemplazar datastore\n");
-    printf("  delete                        DELETE /c — borrar datastore completo\n");
-    printf("  observe [segundos]            GET /s Observe(0) — stream de eventos\n");
-    printf("  demo                          Reproduce ejemplos exactos del draft\n");
-    printf("  sidcheck                      Re-verificar compatibilidad SID con el servidor\n");
-    printf("  info                          mostrar configuración actual\n");
-    printf("  quit / exit                   salir\n");
+    printf("  store  [type] [value]         PUT /c  - initialize datastore\n");
+    printf("  store  ietf-example           PUT /c  - exact draft example §3.3.1\n");
+    printf("  fetch  <SID> [SID...]         FETCH /c - read specific SIDs\n");
+    printf("  fetch  [SID,key]              FETCH /c - list instance (draft §3.1.3.1)\n");
+    printf("  sfetch <SID> [SID...]         FETCH /s - SID-filtered stream\n");
+    printf("  get                           GET /c  - full datastore\n");
+    printf("  ipatch <SID> <value>          iPATCH /c - update SID (in payload)\n");
+    printf("  ipatch <SID> null             iPATCH /c - delete one SID\n");
+    printf("  ipatch [SID,key] null         iPATCH /c - delete list instance\n");
+    printf("  ipatch [SID,key] <value>      iPATCH /c - update/add instance\n");
+    printf("  post reboot [delay]           POST /c - invoke RPC reboot (SID 61000)\n");
+    printf("  post reset <name> <reset-at>  POST /c - invoke action reset (SID 60002)\n");
+    printf("  put    <SID> <v> [SID <v>]    PUT /c  - replace datastore\n");
+    printf("  delete                        DELETE /c - delete full datastore\n");
+    printf("  observe [seconds]             GET /s Observe(0) - event stream\n");
+    printf("  demo                          replay exact draft examples\n");
+    printf("  sidcheck                      re-check SID compatibility with server\n");
+    printf("  info                          show current configuration\n");
+    printf("  quit / exit                   exit\n");
     printf("  ───────────────────────────────────────────────────────────────────\n");
     printf("  Content-Formats: 140=yang-data+cbor;id=sid  141=yang-identifiers+cbor-seq\n");
     printf("                   142=yang-instances+cbor-seq\n");
-    printf("  Ejemplos simples:\n");
+    printf("  Simple examples:\n");
     printf("    store temperature 22.5    → PUT datastore {10:temperature, 20:22.5}\n");
-    printf("    get                       → GET /c (datastore completo)\n");
+    printf("    get                       → GET /c (full datastore)\n");
     printf("    fetch 10 20               → FETCH /c SIDs [10,20]\n");
-    printf("    sfetch 1755               → FETCH /s filtrando por SID 1755\n");
+    printf("    sfetch 1755               → FETCH /s filtering by SID 1755\n");
     printf("    ipatch 20 99.9            → iPATCH /c {20:99.9}\n");
-    printf("    ipatch 20 null            → borrar SID 20\n");
-    printf("    observe 30               → escuchar /s durante 30 segundos\n");
-    printf("    delete                    → DELETE /c (datastore completo)\n");
-    printf("  Ejemplos draft (ietf-system + ietf-interfaces):\n");
+    printf("    ipatch 20 null            → delete SID 20\n");
+    printf("    post reboot 77            → POST /c {61000:{1:77}}\n");
+    printf("    post reset myserver 2016-02-08T14:10:08Z\n");
+    printf("                             → POST /c {[60002,\"myserver\"]:{1:\"...\"}}\n");
+    printf("    observe 30               → listen on /s for 30 seconds\n");
+    printf("    delete                    → DELETE /c (full datastore)\n");
+    printf("  Draft examples (ietf-system + ietf-interfaces):\n");
     printf("    store ietf-example        → clock(1721)+ifaces(1533)+ntp(1755,1756)\n");
-    printf("    get                       → ver §3.3.1 del draft\n");
+    printf("    get                       → see §3.3.1 of the draft\n");
     printf("    fetch 1723 [1533,eth0]    → §3.1.3.1: current-datetime + interface eth0\n");
     printf("    ipatch 1755 true          → ntp/enabled=true (§3.2.3.1)\n");
-    printf("    demo                      → pasos 1-5 del draft completos\n\n");
+    printf("    demo                      → complete draft steps 1-5\n\n");
 }
 
 static void tokenize(char *line, char **argv, int *argc) {
@@ -1223,27 +1268,31 @@ static void tokenize(char *line, char **argv, int *argc) {
     }
 }
 
-/* ════════════════════════════════════════════════════════
- * MAIN
- * ══════════════════════════════════════════════════════*/
+
 int main(int argc, char *argv[]) {
     if (argc >= 2) strncpy(g_device_type, argv[1], sizeof(g_device_type) - 1);
 
     if (load_runtime_system_sids(&g_sys_sids) != 0) {
-        fprintf(stderr, "[SID] CLI FATAL: no se pudo cargar sid/ietf-system.sid\n");
+        fprintf(stderr, "[SID] CLI FATAL: could not load sid/ietf-system.sid\n");
         return 1;
     }
     if (load_runtime_interfaces_sids(&g_if_sids) != 0) {
-        fprintf(stderr, "[SID] CLI FATAL: no se pudo cargar sid/ietf-interfaces.sid\n");
+        fprintf(stderr, "[SID] CLI FATAL: could not load sid/ietf-interfaces.sid\n");
+        return 1;
+    }
+    if (load_runtime_operation_sids(&g_ops_sids) != 0) {
+        fprintf(stderr, "[SID] CLI FATAL: could not load sid/ietf-coreconf-actions.sid\n");
         return 1;
     }
 
     const char *host      = getenv("SERVER_HOST");
     const char *port_str  = getenv("SERVER_PORT");
-    const char *dtls_env  = getenv("CORECONF_DTLS");   /* "0" → forzar UDP */
+    const char *sni       = getenv("SERVER_SNI");   
+    const char *dtls_env  = getenv("CORECONF_DTLS");   
     const char *tls_mode  = getenv("CORECONF_TLS_MODE");
-    const char *profile = getenv("CORECONF_CERT_PROFILE");
+    const char *profile   = getenv("CORECONF_CERT_PROFILE");
     const char *ca_file, *cert_file, *key_file;
+
     if (profile && strcmp(profile, "local") == 0) {
         ca_file   = getenv("CORECONF_CA_CERT")     ? getenv("CORECONF_CA_CERT")     : "certs/ca-local.crt";
         cert_file = getenv("CORECONF_CLIENT_CERT") ? getenv("CORECONF_CLIENT_CERT") : "certs/client-local.crt";
@@ -1253,12 +1302,14 @@ int main(int argc, char *argv[]) {
         cert_file = getenv("CORECONF_CLIENT_CERT") ? getenv("CORECONF_CLIENT_CERT") : "certs/client.crt";
         key_file  = getenv("CORECONF_CLIENT_KEY")  ? getenv("CORECONF_CLIENT_KEY")  : "certs/client.key";
     }
+
     const char *psk_id    = getenv("CORECONF_PSK_ID")      ? getenv("CORECONF_PSK_ID")      : "coreconf-client";
     const char *psk_key   = getenv("CORECONF_PSK_KEY")     ? getenv("CORECONF_PSK_KEY")     : "coreconf-secret";
-    if (!host) host = "127.0.0.1";
+    
+    if (!host) host = "localhost";
+    if (!sni) sni = "localhost";
     if (!tls_mode || tls_mode[0] == '\0') tls_mode = "cert";
 
-    /* Por defecto DTLS (5684). CORECONF_DTLS=0 → UDP (5683). */
     int use_dtls = (dtls_env && dtls_env[0] == '0') ? 0 :
                    coap_dtls_is_supported()          ? 1 : 0;
     int port = port_str ? atoi(port_str) : (use_dtls ? 5684 : 5683);
@@ -1266,32 +1317,48 @@ int main(int argc, char *argv[]) {
     printf("╔══════════════════════════════════════════════════════════════╗\n");
     printf("║   CORECONF CLI — draft-ietf-core-comi-20                   ║\n");
     printf("╠══════════════════════════════════════════════════════════════╣\n");
-    printf("║  Datastore único en /c — temperatura, humedad, etc.        ║\n");
+    printf("║  Unified datastore at /c - temperature, humidity, etc.        ║\n");
     printf("╚══════════════════════════════════════════════════════════════╝\n");
-    printf("  Tipo inicial: %s\n", g_device_type);
-    printf("  Servidor:     %s://%s:%d/c  %s\n",
+    printf("  Initial type: %s\n", g_device_type);
+    printf("  Server:       %s://%s:%d/c  %s\n",
            use_dtls ? "coaps" : "coap", host, port,
-           use_dtls ? "(DTLS)" : "(UDP sin cifrar)");
-    if (use_dtls && strcmp(tls_mode, "psk") == 0)
-        printf("  Seguridad:    PSK (id=%s)\n", psk_id);
-    else if (use_dtls)
-        printf("  Seguridad:    CERT (ca=%s, cert=%s, key=%s)\n", ca_file, cert_file, key_file);
-    printf("  Escribe 'help' para ver los comandos.\n\n");
+           use_dtls ? "(DTLS)" : "(unencrypted UDP)");
+
+    if (use_dtls && strcmp(tls_mode, "psk") == 0) {
+        printf("  Security:     PSK (id=%s)\n", psk_id);
+    } else if (use_dtls) {
+        printf("  Security:     CERT (ca=%s, cert=%s, key=%s)\n", ca_file, cert_file, key_file);
+        
+        if (access(ca_file, R_OK) != 0) fprintf(stderr, "\n[DTLS WARN] Cannot read CA file: %s\n", ca_file);
+        if (access(cert_file, R_OK) != 0) fprintf(stderr, "[DTLS WARN] Cannot read client certificate: %s\n", cert_file);
+        if (access(key_file, R_OK) != 0) fprintf(stderr, "[DTLS WARN] Cannot read client private key: %s\n\n", key_file);
+    }
+    printf("  Type 'help' to see commands.\n\n");
 
     coap_startup();
-    coap_set_log_level(COAP_LOG_ERR);
+
+    const char *log_env = getenv("COAP_DEBUG_LEVEL");
+    if (log_env && strcmp(log_env, "debug") == 0) {
+        coap_set_log_level(COAP_LOG_DEBUG);
+    } else {
+        coap_set_log_level(COAP_LOG_WARN);
+    }
 
     coap_address_t dst;
     coap_address_init(&dst);
     dst.size = sizeof(struct sockaddr_in);
     dst.addr.sin.sin_family = AF_INET;
     dst.addr.sin.sin_port   = htons(port);
-    if (inet_pton(AF_INET, host, &dst.addr.sin.sin_addr) != 1) {
-        fprintf(stderr, "IP inválida: %s\n", host); return 1;
+    
+   struct hostent *he = gethostbyname(host);
+    if (he) {
+        memcpy(&dst.addr.sin.sin_addr, he->h_addr_list[0], he->h_length);
+    } else if (inet_pton(AF_INET, host, &dst.addr.sin.sin_addr) != 1) {
+        fprintf(stderr, "Unresolvable IP/host: %s\n", host); return 1;
     }
 
     g_ctx = coap_new_context(NULL);
-    if (!g_ctx) { fprintf(stderr, "Error creando contexto CoAP\n"); return 1; }
+    if (!g_ctx) { fprintf(stderr, "Error creating CoAP context\n"); return 1; }
 
     if (use_dtls && strcmp(tls_mode, "psk") == 0) {
         coap_dtls_cpsk_t cpsk;
@@ -1316,7 +1383,7 @@ int main(int argc, char *argv[]) {
         pki.check_cert_revocation    = 0;
         pki.allow_no_crl             = 1;
         pki.allow_expired_crl        = 1;
-        pki.client_sni               = (char *)host;
+        pki.client_sni               = (char *)sni;
         pki.pki_key.key_type         = COAP_PKI_KEY_PEM;
         pki.pki_key.key.pem.ca_file     = ca_file;
         pki.pki_key.key.pem.public_cert = cert_file;
@@ -1325,8 +1392,9 @@ int main(int argc, char *argv[]) {
     } else {
         g_session = coap_new_client_session(g_ctx, NULL, &dst, COAP_PROTO_UDP);
     }
+    
     if (!g_session) {
-        fprintf(stderr, "Error creando sesión %s\n", use_dtls ? "DTLS" : "CoAP");
+        fprintf(stderr, "Error creating session %s\n", use_dtls ? "DTLS" : "CoAP");
         coap_free_context(g_ctx); return 1;
     }
     coap_register_response_handler(g_ctx, response_handler);
@@ -1338,15 +1406,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* ── REPL ── */
+    
     char line[512];
     while (1) {
         printf("coreconf> ");
         fflush(stdout);
 
-        if (!fgets(line, sizeof(line), stdin)) break; /* EOF / Ctrl-D */
+        if (!fgets(line, sizeof(line), stdin)) break; 
 
-        /* Trim */
         size_t ll = strlen(line);
         while (ll > 0 && (line[ll-1] == '\n' || line[ll-1] == '\r')) line[--ll] = '\0';
         if (ll == 0) continue;
@@ -1362,7 +1429,7 @@ int main(int argc, char *argv[]) {
         else if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0)
             break;
         else if (strcmp(cmd, "info") == 0)
-             printf("  tipo=%s  servidor=%s://%s:%d/c  tls-mode=%s\n",
+             printf("  type=%s  server=%s://%s:%d/c  tls-mode=%s\n",
                  g_device_type,
                  use_dtls ? "coaps" : "coap", host, port,
                  use_dtls ? tls_mode : "none");
@@ -1371,16 +1438,17 @@ int main(int argc, char *argv[]) {
         else if (strcmp(cmd, "sfetch") == 0) cmd_sfetch(nargs-1, args+1);
         else if (strcmp(cmd, "get")    == 0) cmd_get   ();
         else if (strcmp(cmd, "ipatch") == 0) cmd_ipatch(nargs-1, args+1);
+        else if (strcmp(cmd, "post")   == 0) cmd_post  (nargs-1, args+1);
         else if (strcmp(cmd, "put")    == 0) cmd_put   (nargs-1, args+1);
         else if (strcmp(cmd, "delete") == 0) cmd_delete(nargs-1, args+1);
         else if (strcmp(cmd, "observe") == 0) cmd_observe(nargs-1, args+1);
         else if (strcmp(cmd, "demo")     == 0) cmd_demo  ();
         else if (strcmp(cmd, "sidcheck") == 0) check_server_sid_compatibility();
         else
-            printf("  Comando desconocido: '%s'  (escribe 'help')\n", cmd);
+            printf("  Unknown command: '%s'  (type 'help')\n", cmd);
     }
 
-    printf("\nSaliendo...\n");
+    printf("\nExiting...\n");
     coap_session_release(g_session);
     coap_free_context(g_ctx);
     coap_cleanup();

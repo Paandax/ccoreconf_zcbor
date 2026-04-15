@@ -1,10 +1,10 @@
-# Dockerfile para simular dispositivo IoT con ccoreconf + zcbor
+# Dockerfile to simulate an IoT device with ccoreconf + zcbor
 FROM ubuntu:22.04
 
-# Evitar prompts interactivos
+# Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Instalar dependencias básicas + libcoap3
+# Install base dependencies + libcoap3
 RUN apt-get update && apt-get install -y \
     build-essential \
     gcc \
@@ -18,10 +18,10 @@ RUN apt-get update && apt-get install -y \
     tcpdump \
     && rm -rf /var/lib/apt/lists/*
 
-# Crear directorio de trabajo
+# Create working directory
 WORKDIR /iot_device
 
-# Copiar código fuente desde el directorio raíz del proyecto
+# Copy source code from project root
 COPY include/ ./include/
 COPY src/ ./src/
 COPY coreconf_zcbor_generated/ ./coreconf_zcbor_generated/
@@ -29,34 +29,48 @@ COPY sid/ ./sid/
 COPY iot_containers/certs/ ./certs/
 COPY Makefile ./
 
-# Copiar aplicaciones IoT específicas
+# Copy IoT applications
 COPY iot_containers/iot_apps/ ./iot_apps/
 
-# Compilar la biblioteca
+# Build library
 RUN make clean && make
 
-# Ajustar rutas de includes en los archivos IoT antes de compilar
+# Adjust include paths and libcoap log constants
+# Replace DEBUG with WARN for Ubuntu compiler compatibility
 RUN cd iot_apps && \
     sed -i 's|"../../include/|"|g' *.c && \
-    sed -i 's|"../../coreconf_zcbor_generated/|"|g' *.c
+    sed -i 's|"../../coreconf_zcbor_generated/|"|g' *.c && \
+    sed -i 's/COAP_LOG_DEBUG/COAP_LOG_WARN/g' *.c && \
+    sed -i 's/COAP_LOG_INFO/COAP_LOG_WARN/g' *.c
 
-# Compilar aplicaciones CORECONF (draft-ietf-core-comi-20)
-# Preferir backend con DTLS: openssl -> gnutls -> notls (fallback)
+# Build CORECONF applications (draft-ietf-core-comi-20)
 RUN COAP_PKG=$(pkg-config --exists libcoap-3-openssl && echo libcoap-3-openssl || \
                (pkg-config --exists libcoap-3-gnutls && echo libcoap-3-gnutls || echo libcoap-3-notls)) && \
-    COAP_LIBS=$(pkg-config --libs "$COAP_PKG" 2>/dev/null || echo "-lcoap-3-notls") && \
+    COAP_LIBS=$(pkg-config --libs "$COAP_PKG" 2>/dev/null || echo "-lcoap-3") && \
     COAP_INC=$(pkg-config --cflags "$COAP_PKG" 2>/dev/null || echo "") && \
-    echo "Usando backend libcoap: $COAP_PKG" && \
-    echo "Usando flags: $COAP_INC $COAP_LIBS" && \
+    echo "Using libcoap backend: $COAP_PKG" && \
+    echo "Using flags: $COAP_INC $COAP_LIBS" && \
     cd iot_apps && \
-    gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated $COAP_INC \
+    gcc -Wall -Wextra -pedantic -std=c11 -I../include -I../coreconf_zcbor_generated $COAP_INC \
         coreconf_server.c ../ccoreconf.a $COAP_LIBS -pthread -o coreconf_server && \
-    gcc -Wall -Wextra -pedantic -std=c11 -Werror -I../include -I../coreconf_zcbor_generated $COAP_INC \
+    gcc -Wall -Wextra -pedantic -std=c11 -I../include -I../coreconf_zcbor_generated $COAP_INC \
         coreconf_cli.c ../ccoreconf.a $COAP_LIBS -pthread -o coreconf_cli
 
-# Puertos CoAP / CoAPS
+# CoAP / CoAPS ports
 EXPOSE 5683/udp
 EXPOSE 5684/udp
 
-# Por defecto, ejecutar el servidor CORECONF
+# 1. Create test user 'iotadmin'
+RUN useradd -m iotadmin && echo "iotadmin:admin1234" | chpasswd
+
+# 2. Copy password rotation script into the container
+COPY iot_containers/rotate_password.sh /usr/local/bin/rotate_password.sh
+
+# 3. Make script executable
+RUN chmod +x /usr/local/bin/rotate_password.sh
+
+# Create security audit log file
+RUN touch /var/log/iot_security.log && chmod 666 /var/log/iot_security.log
+
+# Default entrypoint: run CORECONF server
 CMD ["./iot_apps/coreconf_server"]

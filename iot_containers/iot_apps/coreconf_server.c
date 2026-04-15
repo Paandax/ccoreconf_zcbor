@@ -1,4 +1,4 @@
-// === INCLUDES: TODOS AL PRINCIPIO ===
+/* CORECONF server implementation over CoAP/CoAPS using libcoap. */
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,18 +10,18 @@
 #include <time.h>
 #include <signal.h>
 
-#include "../../include/coreconfTypes.h"
+
 #include "../../include/serialization.h"
 #include "../../include/fetch.h"
 #include "../../include/get.h"
 #include "../../include/ipatch.h"
+#include "../../include/post.h"
 #include "../../include/put.h"
 #include "../../include/delete.h"
 #include "../../include/sids.h"
 #include "../../coreconf_zcbor_generated/zcbor_encode.h"
 #include "../../coreconf_zcbor_generated/zcbor_decode.h"
 
-// === PROTOTIPOS DE FUNCIONES ESTÁTICAS ===
 static size_t stream_wrap_notification_instance(uint8_t *out, size_t out_sz, uint64_t notif_sid, const uint8_t *payload_map, size_t payload_map_len);
 static void stream_push_event(const uint8_t *data, size_t len, const char *reason);
 static void notify_stream_observers(const char *reason);
@@ -33,7 +33,6 @@ static int load_text_from_candidates(const char *const *candidates,
                                      const char **chosen_out);
 static int parse_sid_after_identifier(const char *text, const char *identifier, uint64_t *sid_out);
 
-// Carga todos los archivos .sid de la carpeta sid/ (notificación y datos)
 static void load_all_sid_files(void) {
     const char *sid_dir = "sid";
     DIR *dir = opendir(sid_dir);
@@ -54,21 +53,17 @@ static void load_all_sid_files(void) {
             fread(text, 1, sz, fp);
             text[sz] = '\0';
             fclose(fp);
-            // Solo para mostrar que se ha cargado, puedes parsear SIDs aquí si quieres
-            printf("[SID] Archivo cargado: %s\n", path);
+            printf("[SID] Loaded file: %s\n", path);
             free(text);
         }
     }
     closedir(dir);
 }
 
-// Genera y publica un evento de ejemplo como en el draft (notificación 60010)
 static void publish_example_port_fault(const char *port_name, const char *port_fault) {
-    // SIDs según el .sid file
     uint64_t notif_sid = 60010;
-    uint64_t sid_port_name = 1; // draft usa 1 para port-name
-    uint64_t sid_port_fault = 2; // draft usa 2 para port-fault
-    // Mapa interno: {1: port_name, 2: port_fault}
+    uint64_t sid_port_name = 1; // Draft example uses SID 1 for port-name
+    uint64_t sid_port_fault = 2; // Draft example uses SID 2 for port-fault
     uint8_t buf[256];
     zcbor_state_t enc[4];
     zcbor_new_encode_state(enc, 4, buf, sizeof(buf), 1);
@@ -79,39 +74,19 @@ static void publish_example_port_fault(const char *port_name, const char *port_f
     zcbor_tstr_put_lit(enc, port_fault);
     zcbor_map_end_encode(enc, 2);
     size_t map_len = (size_t)(enc[0].payload - buf);
-    // Envolver como {60010: {1:..., 2:...}}
     uint8_t wrapped[300];
     size_t wrapped_len = stream_wrap_notification_instance(wrapped, sizeof(wrapped), notif_sid, buf, map_len);
     assert(wrapped_len > 0);
     stream_push_event(wrapped, wrapped_len, "example-port-fault");
     notify_stream_observers("example-port-fault");
-    printf("[EXAMPLE] Evento example-port-fault publicado\n");
+    printf("[EXAMPLE] example-port-fault event published\n");
 }
 
 #define BUFFER_SIZE 4096
-/**
- * coreconf_server.c - Servidor CORECONF (draft-ietf-core-comi-20)
- *
- * UN ÚNICO DATASTORE en /c (draft §2.4: "A CORECONF server supports a
- * single unified datastore").  El datastore puede contener nodos de
- * cualquier tipo: temperatura, humedad, etc., cada uno con su propio SID.
- *
- * Métodos soportados:
- *   PUT    /c  → inicializar / reemplazar datastore  (CF=140)
- *   FETCH  /c  → leer SIDs concretos               (CF=141 req, CF=142 resp)
- *   GET    /c  → leer datastore completo            (CF=140 resp)
- *   iPATCH /c  → actualización parcial              (CF=142 req)
- *   DELETE /c  → borrar datastore completo
- *   POST   /c  → solo RPC/acciones (no para datos)
- *
- * No hay parámetros ?id= — el identificador de nodo va siempre en el
- * payload (draft §3.2.3 para iPATCH, §3.1.3 para FETCH).
- */
 
-// --- INCLUDES DE COAP Y RESTO ---
-// COAP Y RESTO DE INCLUDES
+
 #include <coap3/coap.h>
-/* Compat: libcoap3-dev de Ubuntu 22.04 puede usar nombres distintos */
+
 #ifndef COAP_LOG_WARN
 #define COAP_LOG_WARN 4
 #endif
@@ -128,6 +103,7 @@ static void publish_example_port_fault(const char *port_name, const char *port_f
 #include "../../include/fetch.h"
 #include "../../include/get.h"
 #include "../../include/ipatch.h"
+#include "../../include/post.h"
 #include "../../include/put.h"
 #include "../../include/delete.h"
 #include "../../include/sids.h"
@@ -136,19 +112,19 @@ static void publish_example_port_fault(const char *port_name, const char *port_f
 
 #define BUFFER_SIZE 4096
 
-/* Content-Format values (draft-ietf-core-comi-20) */
-#define CF_YANG_DATA_CBOR   140   /* application/yang-data+cbor;id=sid   */
-#define CF_YANG_IDENTIFIERS 141   /* application/yang-identifiers+cbor-seq */
-#define CF_YANG_INSTANCES   142   /* application/yang-instances+cbor-seq  */
-#define CF_TEXT_PLAIN       0     /* text/plain; charset=utf-8 */
+
+#define CF_YANG_DATA_CBOR   140   
+#define CF_YANG_IDENTIFIERS 141   
+#define CF_YANG_INSTANCES   142   
+#define CF_TEXT_PLAIN       0     
 
 static int quit = 0;
 
-/* ── Datastore único (draft §2.4) ── */
+
 static CoreconfValueT *g_datastore = NULL;
 static int             g_ds_exists = 0;
 static uint64_t        g_sid_fingerprint = 0;
-static uint64_t        g_notification_sid = 0; // SID de notificación (ejemplo: 60010)
+static uint64_t        g_notification_sid = 0; // Notification SID (example: 60010)
 static int load_notification_sid(uint64_t *out) {
     if (!out) return -1;
     const char *candidates[] = {
@@ -160,16 +136,16 @@ static int load_notification_sid(uint64_t *out) {
     char *text = NULL;
     const char *chosen = NULL;
     if (load_text_from_candidates(candidates, sizeof(candidates)/sizeof(candidates[0]), &text, &chosen) != 0) {
-        fprintf(stderr, "[SID] No se encontró ietf-comi-notification.sid en rutas conocidas\n");
+        fprintf(stderr, "[SID] ietf-comi-notification.sid not found in known paths\n");
         return -1;
     }
     int ok = parse_sid_after_identifier(text, "/ietf-comi-notification:notification", out);
     free(text);
     if (ok != 0) {
-        fprintf(stderr, "[SID] Error parseando SID de notificación en %s\n", chosen);
+        fprintf(stderr, "[SID] Error parsing notification SID in %s\n", chosen);
         return -1;
     }
-    printf("[SID] Notificación cargada %s: notification_sid=%" PRIu64 "\n", chosen, *out);
+    printf("[SID] Notification loaded %s: notification_sid=%" PRIu64 "\n", chosen, *out);
     return 0;
 }
 static coap_resource_t *g_stream_res = NULL;
@@ -213,6 +189,23 @@ typedef struct RuntimeInterfacesSids {
 
 static RuntimeInterfacesSidsT g_if_sids = {0};
 
+typedef struct RuntimeOperationSids {
+    uint64_t reboot_rpc_sid;
+    uint64_t reboot_input_delay;
+    uint64_t reset_action_sid;
+    uint64_t reset_input_reset_at;
+    uint64_t reset_output_finished_at;
+    int loaded;
+} RuntimeOperationSidsT;
+
+static RuntimeOperationSidsT g_ops_sids = {0};
+
+#define DEFAULT_RPC_REBOOT_SID              61000ULL
+#define DEFAULT_RPC_REBOOT_INPUT_DELAY      1ULL
+#define DEFAULT_ACTION_RESET_SID            60002ULL
+#define DEFAULT_ACTION_RESET_INPUT_RESET_AT 1ULL
+#define DEFAULT_ACTION_RESET_OUTPUT_FINISHED_AT 2ULL
+
 static uint64_t sid_hash_mix_u64(uint64_t hash, uint64_t value) {
     hash ^= value;
     hash *= 1099511628211ULL;
@@ -220,7 +213,8 @@ static uint64_t sid_hash_mix_u64(uint64_t hash, uint64_t value) {
 }
 
 static uint64_t compute_sid_fingerprint(const RuntimeSystemSidsT *sys,
-                                        const RuntimeInterfacesSidsT *ifs) {
+                                        const RuntimeInterfacesSidsT *ifs,
+                                        const RuntimeOperationSidsT *ops) {
     uint64_t h = 1469598103934665603ULL;
     h = sid_hash_mix_u64(h, sys->module);
     h = sid_hash_mix_u64(h, sys->clock);
@@ -240,6 +234,11 @@ static uint64_t compute_sid_fingerprint(const RuntimeSystemSidsT *sys,
     h = sid_hash_mix_u64(h, ifs->iface_type);
     h = sid_hash_mix_u64(h, ifs->iface_oper_status);
     h = sid_hash_mix_u64(h, ifs->identity_ethernet_csmacd);
+    h = sid_hash_mix_u64(h, ops->reboot_rpc_sid);
+    h = sid_hash_mix_u64(h, ops->reboot_input_delay);
+    h = sid_hash_mix_u64(h, ops->reset_action_sid);
+    h = sid_hash_mix_u64(h, ops->reset_input_reset_at);
+    h = sid_hash_mix_u64(h, ops->reset_output_finished_at);
     return h;
 }
 
@@ -316,7 +315,7 @@ static int load_runtime_system_sids(RuntimeSystemSidsT *out) {
     if (load_text_from_candidates(candidates,
                                   sizeof(candidates) / sizeof(candidates[0]),
                                   &text, &chosen) != 0) {
-        fprintf(stderr, "[SID] No se encontró ietf-system.sid en rutas conocidas\n");
+        fprintf(stderr, "[SID] ietf-system.sid not found in known paths\n");
         return -1;
     }
 
@@ -335,12 +334,12 @@ static int load_runtime_system_sids(RuntimeSystemSidsT *out) {
     free(text);
 
     if (ok != 0) {
-        fprintf(stderr, "[SID] Error parseando SIDs críticos en %s\n", chosen);
+        fprintf(stderr, "[SID] Error parsing critical SIDs in %s\n", chosen);
         return -1;
     }
 
     out->loaded = 1;
-    printf("[SID] cargado %s\n", chosen);
+    printf("[SID] loaded %s\n", chosen);
     printf("[SID] module=%" PRIu64 " clock=%" PRIu64 " ntp-enabled=%" PRIu64 " ntp-server=%" PRIu64 "\n",
            out->module, out->clock, out->ntp_enabled, out->ntp_server);
     return 0;
@@ -362,7 +361,7 @@ static int load_runtime_interfaces_sids(RuntimeInterfacesSidsT *out) {
     if (load_text_from_candidates(candidates,
                                   sizeof(candidates) / sizeof(candidates[0]),
                                   &text, &chosen) != 0) {
-        fprintf(stderr, "[SID] No se encontró ietf-interfaces.sid en rutas conocidas\n");
+        fprintf(stderr, "[SID] ietf-interfaces.sid not found in known paths\n");
         return -1;
     }
 
@@ -379,21 +378,68 @@ static int load_runtime_interfaces_sids(RuntimeInterfacesSidsT *out) {
     free(text);
 
     if (ok != 0) {
-        fprintf(stderr, "[SID] Error parseando SIDs críticos en %s\n", chosen);
+        fprintf(stderr, "[SID] Error parsing critical SIDs in %s\n", chosen);
         return -1;
     }
 
     out->loaded = 1;
-    printf("[SID] cargado %s\n", chosen);
+    printf("[SID] loaded %s\n", chosen);
     printf("[SID] module=%" PRIu64 " iface=%" PRIu64 " name=%" PRIu64 " oper-status=%" PRIu64 "\n",
            out->module, out->iface, out->iface_name, out->iface_oper_status);
     return 0;
 }
 
-/* ── Carga el datastore de los ejemplos del draft §3.3.1 ── */
+static int load_runtime_operation_sids(RuntimeOperationSidsT *out) {
+    if (!out) return -1;
+
+    const char *candidates[] = {
+        "sid/ietf-coreconf-actions.sid",
+        "../sid/ietf-coreconf-actions.sid",
+        "../../sid/ietf-coreconf-actions.sid",
+        "../../../sid/ietf-coreconf-actions.sid",
+        "/app/sid/ietf-coreconf-actions.sid",
+    };
+
+    char *text = NULL;
+    const char *chosen = NULL;
+    if (load_text_from_candidates(candidates,
+                                  sizeof(candidates) / sizeof(candidates[0]),
+                                  &text, &chosen) != 0) {
+        fprintf(stderr, "[SID] warning: ietf-coreconf-actions.sid not found, using built-in POST SIDs\n");
+        out->reboot_rpc_sid = DEFAULT_RPC_REBOOT_SID;
+        out->reboot_input_delay = DEFAULT_RPC_REBOOT_INPUT_DELAY;
+        out->reset_action_sid = DEFAULT_ACTION_RESET_SID;
+        out->reset_input_reset_at = DEFAULT_ACTION_RESET_INPUT_RESET_AT;
+        out->reset_output_finished_at = DEFAULT_ACTION_RESET_OUTPUT_FINISHED_AT;
+        out->loaded = 1;
+        return 0;
+    }
+
+    int ok = 0;
+    ok |= parse_sid_after_identifier(text, "/ietf-coreconf-actions:reboot\"", &out->reboot_rpc_sid);
+    ok |= parse_sid_after_identifier(text, "/ietf-coreconf-actions:reboot/input/delay\"", &out->reboot_input_delay);
+    ok |= parse_sid_after_identifier(text, "/ietf-coreconf-actions:reset\"", &out->reset_action_sid);
+    ok |= parse_sid_after_identifier(text, "/ietf-coreconf-actions:reset/input/reset-at\"", &out->reset_input_reset_at);
+    ok |= parse_sid_after_identifier(text, "/ietf-coreconf-actions:reset/output/reset-finished-at\"", &out->reset_output_finished_at);
+
+    free(text);
+
+    if (ok != 0) {
+        fprintf(stderr, "[SID] Error parsing POST operation SIDs in %s\n", chosen);
+        return -1;
+    }
+
+    out->loaded = 1;
+    printf("[SID] loaded %s\n", chosen);
+    printf("[SID] reboot=%" PRIu64 " reset=%" PRIu64 " reset-out=%" PRIu64 "\n",
+           out->reboot_rpc_sid, out->reset_action_sid, out->reset_output_finished_at);
+    return 0;
+}
+
+
 static void init_ietf_example_datastore(void) {
     if (!g_sys_sids.loaded || !g_if_sids.loaded) {
-        fprintf(stderr, "[SID] diccionario SID no cargado; no se inicializa datastore\n");
+        fprintf(stderr, "[SID] SID dictionary not loaded; datastore initialization skipped\n");
         return;
     }
 
@@ -411,7 +457,7 @@ static void init_ietf_example_datastore(void) {
 
     CoreconfValueT *ds = createCoreconfHashmap();
 
-    /* clock container: SID(runtime) → {delta boot, delta current} */
+    
     CoreconfValueT *clock_c = createCoreconfHashmap();
     insertCoreconfHashMap(clock_c->data.map_value, delta_clock_boot,
         createCoreconfString("2014-10-05T09:00:00Z"));
@@ -419,7 +465,7 @@ static void init_ietf_example_datastore(void) {
         createCoreconfString("2016-10-26T12:16:31Z"));
     insertCoreconfHashMap(ds->data.map_value, g_sys_sids.clock, clock_c);
 
-    /* interface list: SID(runtime) → [{name,desc,type,enabled,oper-status}] */
+    
     CoreconfValueT *iface = createCoreconfHashmap();
     insertCoreconfHashMap(iface->data.map_value, delta_if_name,        createCoreconfString("eth0"));
     insertCoreconfHashMap(iface->data.map_value, delta_if_desc,        createCoreconfString("Ethernet adaptor"));
@@ -431,10 +477,10 @@ static void init_ietf_example_datastore(void) {
     free(iface);
     insertCoreconfHashMap(ds->data.map_value, g_if_sids.iface, ifaces);
 
-    /* ntp/enabled: SID(runtime) → false */
+    
     insertCoreconfHashMap(ds->data.map_value, g_sys_sids.ntp_enabled, createCoreconfBoolean(false));
 
-    /* ntp/server list: SID(runtime) → [{name, prefer, udp:{address}}] */
+    
     CoreconfValueT *udp = createCoreconfHashmap();
     insertCoreconfHashMap(udp->data.map_value, delta_ntp_udp_addr, createCoreconfString("128.100.49.105"));
     CoreconfValueT *srv = createCoreconfHashmap();
@@ -449,15 +495,13 @@ static void init_ietf_example_datastore(void) {
     if (g_datastore) freeCoreconf(g_datastore, true);
     g_datastore = ds;
     g_ds_exists = 1;
-     printf("Datastore ietf-example cargado: %zu SIDs (clock %" PRIu64 ", ifaces %" PRIu64 ", ntp %" PRIu64 "/%" PRIu64 ")\n\n",
+     printf("ietf-example datastore loaded: %zu SIDs (clock %" PRIu64 ", ifaces %" PRIu64 ", ntp %" PRIu64 "/%" PRIu64 ")\n\n",
            g_datastore->data.map_value->size,
               g_sys_sids.clock, g_if_sids.iface, g_sys_sids.ntp_enabled, g_sys_sids.ntp_server);
 
 }
 
-/* ────────────────────────────────────────────────────────────
- * Helpers
- * ──────────────────────────────────────────────────────────*/
+
 static void print_cbor_hex(const char *prefix, const uint8_t *d, size_t len) {
     printf("%s(%zu bytes): ", prefix, len);
     for (size_t i = 0; i < len && i < 32; i++) printf("%02x ", d[i]);
@@ -472,7 +516,7 @@ static uint16_t get_content_format(const coap_pdu_t *pdu) {
     return (uint16_t)coap_decode_var_bytes(coap_opt_value(opt), coap_opt_length(opt));
 }
 
-/* RFC §6 error payload: { 1024: { 4: error_sid, 3: "msg" } } */
+
 static size_t encode_error(uint8_t *buf, size_t sz, uint64_t esid, const char *msg) {
     size_t ml = strlen(msg);
     if (sz < 16 + ml) return 0;
@@ -561,7 +605,7 @@ static size_t stream_wrap_notification_instance(uint8_t *out, size_t out_sz,
                                                 size_t payload_map_len) {
     if (!out || out_sz < 2 || !payload_map || payload_map_len == 0) return 0;
 
-    /* one-item map: { <notification-sid> : <payload-map> } */
+    
     out[0] = 0xa1;
     size_t key_len = cbor_encode_uint(out + 1, out_sz - 1, notif_sid);
     if (key_len == 0) return 0;
@@ -586,7 +630,7 @@ static uint64_t stream_extract_first_sid_from_map(const uint8_t *map_data, size_
         if (!zcbor_uint64_decode(st, &sid)) sid = fallback_sid;
     } else if (mt == ZCBOR_MAJOR_TYPE_LIST) {
         if (zcbor_list_start_decode(st) && zcbor_uint64_decode(st, &sid)) {
-            /* Ignore remaining IID key parts and close list. */
+            
             if (!zcbor_any_skip(st, NULL)) sid = fallback_sid;
             if (!zcbor_list_end_decode(st)) sid = fallback_sid;
         } else {
@@ -680,7 +724,7 @@ static int stream_collect_filter_sids(const uint8_t *data, size_t len,
             if (!zcbor_list_start_decode(st)) break;
             uint64_t sid = 0;
             if (!zcbor_uint64_decode(st, &sid)) break;
-            /* IID compuesto [SID, ...]: de momento filtramos por SID base. */
+            
             if (!zcbor_any_skip(st, NULL)) break;
             if (!zcbor_list_end_decode(st)) break;
             out_sids[count++] = sid;
@@ -709,7 +753,7 @@ static int stream_event_matches_filter(const uint8_t *data, size_t len,
     const uint8_t *ptr = data;
     const uint8_t *end = data + len;
 
-    /* Cada evento puede ser una cbor-seq con uno o más mapas. */
+    
     while (ptr < end) {
         zcbor_state_t st[16];
         zcbor_new_decode_state(st, 16, ptr, (size_t)(end - ptr), 1, NULL, 0);
@@ -791,10 +835,10 @@ static size_t stream_encode_sequence_filtered(uint8_t *out, size_t out_sz, size_
 static void notify_stream_observers(const char *reason) {
     if (!g_stream_res) return;
     coap_resource_notify_observers(g_stream_res, NULL);
-    printf("[OBSERVE] notificado stream /s (%s)\n", reason ? reason : "change");
+    printf("[OBSERVE] notified stream /s (%s)\n", reason ? reason : "change");
 }
 
-/* SID info endpoint for client/server compatibility checks */
+
 static void handle_sid_info(coap_resource_t *rsrc, coap_session_t *sess,
                             const coap_pdu_t *req, const coap_string_t *query,
                             coap_pdu_t *resp) {
@@ -813,10 +857,7 @@ static void handle_sid_info(coap_resource_t *rsrc, coap_session_t *sess,
     coap_add_data(resp, (size_t)n, (const uint8_t *)body);
 }
 
-/* ════════════════════════════════════════════════════════════
- * GET /s  — event stream (Observe)
- * CF=142 con CBOR sequence de notificaciones (más nueva primero).
- * ══════════════════════════════════════════════════════════*/
+
 static void handle_stream_get(coap_resource_t *rsrc, coap_session_t *sess,
                               const coap_pdu_t *req, const coap_string_t *query,
                               coap_pdu_t *resp) {
@@ -834,19 +875,16 @@ static void handle_stream_get(coap_resource_t *rsrc, coap_session_t *sess,
     size_t len = stream_encode_sequence(buf, BUFFER_SIZE, 8);
     if (len > 0) {
         coap_add_data(resp, len, buf);
-        printf("[OBSERVE] GET /s (%s) -> %zu bytes (%zu event(s) en cola)\n",
+        printf("[OBSERVE] GET /s (%s) -> %zu bytes (%zu queued event(s))\n",
                has_observe ? "observe" : "plain", len, g_stream_event_count);
     } else {
-        /* stream sin contenido: cbor-seq vacía (0 bytes) */
-        printf("[OBSERVE] GET /s (%s) -> stream vacío\n", has_observe ? "observe" : "plain");
+        
+        printf("[OBSERVE] GET /s (%s) -> empty stream\n", has_observe ? "observe" : "plain");
     }
     (void)query;
 }
 
-/* ════════════════════════════════════════════════════════════
- * FETCH /s  — event stream con filtro opcional
- * Si no se soporta filtro, el payload se ignora (permitido por draft).
- * ══════════════════════════════════════════════════════════*/
+
 static void handle_stream_fetch(coap_resource_t *rsrc, coap_session_t *sess,
                                 const coap_pdu_t *req, const coap_string_t *query,
                                 coap_pdu_t *resp) {
@@ -872,7 +910,7 @@ static void handle_stream_fetch(coap_resource_t *rsrc, coap_session_t *sess,
                        1012, "FETCH /s filter payload has no valid IIDs");
             return;
         }
-        printf("[OBSERVE] FETCH /s con filtro (%zu bytes) -> %zu SID(s) base\n", qlen, filter_count);
+        printf("[OBSERVE] FETCH /s with filter (%zu bytes) -> %zu SID(s) base\n", qlen, filter_count);
     }
 
     coap_pdu_set_code(resp, COAP_RESPONSE_CODE_CONTENT);
@@ -884,36 +922,234 @@ static void handle_stream_fetch(coap_resource_t *rsrc, coap_session_t *sess,
     size_t len = stream_encode_sequence_filtered(buf, BUFFER_SIZE, 8, filter_sids, filter_count);
     if (len > 0) {
         coap_add_data(resp, len, buf);
-        printf("[OBSERVE] FETCH /s -> %zu bytes (%zu event(s) en cola, filtro=%s)\n",
-               len, g_stream_event_count, has_payload ? "si" : "no");
+        printf("[OBSERVE] FETCH /s -> %zu bytes (%zu queued event(s), filter=%s)\n",
+               len, g_stream_event_count, has_payload ? "yes" : "no");
     } else {
-        printf("[OBSERVE] FETCH /s -> stream vacío (filtro=%s)\n", has_payload ? "si" : "no");
+        printf("[OBSERVE] FETCH /s -> empty stream (filter=%s)\n", has_payload ? "yes" : "no");
     }
 }
 
-/* ════════════════════════════════════════════════════════════
- * POST /c  — solo para RPC/acciones (draft §3.2.2)
- * No se usa para inicializar datos: eso es PUT.
- * ══════════════════════════════════════════════════════════*/
+static int format_utc_timestamp(char *out, size_t out_sz, time_t when) {
+    struct tm utc_tm;
+    if (!out || out_sz == 0) return -1;
+    if (!gmtime_r(&when, &utc_tm)) return -1;
+    if (strftime(out, out_sz, "%Y-%m-%dT%H:%M:%SZ", &utc_tm) == 0) return -1;
+    return 0;
+}
+
+static int parse_utc_timestamp(const char *in, time_t *when) {
+    int year = 0, month = 0, day = 0;
+    int hour = 0, minute = 0, second = 0;
+    char z = '\0';
+    struct tm tm_val;
+
+    if (!in || !when) return -1;
+
+    if (sscanf(in, "%4d-%2d-%2dT%2d:%2d:%2d%c",
+               &year, &month, &day, &hour, &minute, &second, &z) != 7 || z != 'Z') {
+        return -1;
+    }
+
+    memset(&tm_val, 0, sizeof(tm_val));
+    tm_val.tm_year = year - 1900;
+    tm_val.tm_mon = month - 1;
+    tm_val.tm_mday = day;
+    tm_val.tm_hour = hour;
+    tm_val.tm_min = minute;
+    tm_val.tm_sec = second;
+    tm_val.tm_isdst = 0;
+
+    *when = timegm(&tm_val);
+    return 0;
+}
+
+static CoreconfValueT *create_coreconf_null(void) {
+    CoreconfValueT *v = (CoreconfValueT *)malloc(sizeof(CoreconfValueT));
+    if (!v) {
+        return NULL;
+    }
+    v->type = CORECONF_NULL;
+    v->data.u64 = 0;
+    return v;
+}
+
+
 static void handle_post(coap_resource_t *rsrc, coap_session_t *sess,
                          const coap_pdu_t *req, const coap_string_t *query,
                          coap_pdu_t *resp) {
-    (void)rsrc; (void)sess; (void)req; (void)query;
-    /* El draft reserva POST para RPC/acciones YANG, no para cargar datos.
-     * Para inicializar el datastore usa PUT /c  (CF=140). */
-    send_error(resp, COAP_RESPONSE_CODE_NOT_ALLOWED, 1012,
-               "POST is for RPC/actions only. Use PUT to initialize datastore.");
-    printf("[POST] rechazado — usar PUT para inicializar datastore\n");
+    (void)rsrc; (void)sess; (void)query;
+
+    uint16_t cf = get_content_format(req);
+    if (cf != CF_YANG_INSTANCES) {
+        send_error(resp, COAP_RESPONSE_CODE_UNSUPPORTED_CONTENT_FORMAT,
+                   1012, "POST requires CF=142 (yang-instances+cbor-seq)");
+        return;
+    }
+
+    size_t len = 0;
+    const uint8_t *data = NULL;
+    if (!coap_get_data(req, &len, &data) || len == 0) {
+        send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012, "missing payload");
+        return;
+    }
+    print_cbor_hex("[POST] payload", data, len);
+
+    PostItem *requests = NULL;
+    size_t request_count = 0;
+    PostItem *responses = NULL;
+    uint8_t out[BUFFER_SIZE];
+    size_t out_len = 0;
+
+    if (!parse_post_items(data, len, &requests, &request_count) || request_count == 0) {
+        send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012,
+                   "POST payload must be cbor-seq of single-pair maps");
+        return;
+    }
+
+    responses = (PostItem *)calloc(request_count, sizeof(PostItem));
+    if (!responses) {
+        free_post_items(requests, request_count);
+        send_error(resp, COAP_RESPONSE_CODE_INTERNAL_ERROR, 1013,
+                   "out of memory");
+        return;
+    }
+
+    for (size_t i = 0; i < request_count; i++) {
+        PostItem *in = &requests[i];
+        PostItem *out_item = &responses[i];
+        out_item->iid_type = in->iid_type;
+        out_item->sid = in->sid;
+
+        if (in->iid_type == POST_IID_SID_STR_KEY) {
+            out_item->str_key = strdup(in->str_key ? in->str_key : "");
+            if (!out_item->str_key) {
+                free_post_items(requests, request_count);
+                free_post_items(responses, request_count);
+                send_error(resp, COAP_RESPONSE_CODE_INTERNAL_ERROR, 1013,
+                           "out of memory");
+                return;
+            }
+        }
+
+        if (in->iid_type == POST_IID_SID && in->sid == g_ops_sids.reboot_rpc_sid) {
+            uint64_t delay = 0;
+
+            if (in->value->type == CORECONF_HASHMAP) {
+                CoreconfValueT *delay_value =
+                    getCoreconfHashMap(in->value->data.map_value, g_ops_sids.reboot_input_delay);
+                if (delay_value) {
+                    delay = getCoreconfValueAsUint64(delay_value);
+                }
+            } else if (in->value->type != CORECONF_NULL) {
+                free_post_items(requests, request_count);
+                free_post_items(responses, request_count);
+                send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012,
+                           "reboot RPC input must be map or null");
+                return;
+            }
+
+            out_item->value = create_coreconf_null();
+            if (!out_item->value) {
+                free_post_items(requests, request_count);
+                free_post_items(responses, request_count);
+                send_error(resp, COAP_RESPONSE_CODE_INTERNAL_ERROR, 1013,
+                           "out of memory");
+                return;
+            }
+
+            printf("[POST] RPC reboot sid=%" PRIu64 " delay=%" PRIu64 "s\n",
+                   in->sid, delay);
+
+        } else if (in->iid_type == POST_IID_SID_STR_KEY && in->sid == g_ops_sids.reset_action_sid) {
+            const char *reset_at = NULL;
+            char reset_finished_at[32];
+            time_t reset_base = 0;
+
+            if (in->value->type != CORECONF_HASHMAP) {
+                free_post_items(requests, request_count);
+                free_post_items(responses, request_count);
+                send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012,
+                           "reset action input must be a map");
+                return;
+            }
+
+            CoreconfValueT *reset_at_value =
+                getCoreconfHashMap(in->value->data.map_value, g_ops_sids.reset_input_reset_at);
+            if (!reset_at_value || reset_at_value->type != CORECONF_STRING) {
+                free_post_items(requests, request_count);
+                free_post_items(responses, request_count);
+                send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012,
+                           "reset action requires key 1 as string (reset-at)");
+                return;
+            }
+            reset_at = reset_at_value->data.string_value;
+
+            if (parse_utc_timestamp(reset_at, &reset_base) != 0) {
+                reset_base = time(NULL);
+            }
+
+            if (format_utc_timestamp(reset_finished_at, sizeof(reset_finished_at), reset_base + 3) != 0) {
+                free_post_items(requests, request_count);
+                free_post_items(responses, request_count);
+                send_error(resp, COAP_RESPONSE_CODE_INTERNAL_ERROR, 1013,
+                           "failed to format reset completion timestamp");
+                return;
+            }
+
+            out_item->value = createCoreconfHashmap();
+            if (!out_item->value) {
+                free_post_items(requests, request_count);
+                free_post_items(responses, request_count);
+                send_error(resp, COAP_RESPONSE_CODE_INTERNAL_ERROR, 1013,
+                           "out of memory");
+                return;
+            }
+
+            if (insertCoreconfHashMap(out_item->value->data.map_value,
+                                      g_ops_sids.reset_output_finished_at,
+                                      createCoreconfString(reset_finished_at)) != 0) {
+                free_post_items(requests, request_count);
+                free_post_items(responses, request_count);
+                send_error(resp, COAP_RESPONSE_CODE_INTERNAL_ERROR, 1013,
+                           "failed to build reset action response");
+                return;
+            }
+
+            printf("[POST] action reset sid=%" PRIu64 " key=%s reset-at=%s\n",
+                   in->sid, in->str_key ? in->str_key : "", reset_at);
+
+        } else {
+            free_post_items(requests, request_count);
+            free_post_items(responses, request_count);
+            send_error(resp, COAP_RESPONSE_CODE_NOT_FOUND, 1012,
+                       "unsupported RPC/action IID");
+            return;
+        }
+    }
+
+    out_len = create_post_items(out, sizeof(out), responses, request_count);
+    if (out_len == 0) {
+        free_post_items(requests, request_count);
+        free_post_items(responses, request_count);
+        send_error(resp, COAP_RESPONSE_CODE_INTERNAL_ERROR, 1013,
+                   "failed to encode POST response");
+        return;
+    }
+
+    free_post_items(requests, request_count);
+    free_post_items(responses, request_count);
+
+    coap_pdu_set_code(resp, COAP_RESPONSE_CODE_CHANGED);
+    uint8_t cf_buf[4];
+    size_t cfl = coap_encode_var_safe(cf_buf, sizeof(cf_buf), CF_YANG_INSTANCES);
+    coap_add_option(resp, COAP_OPTION_CONTENT_FORMAT, cfl, cf_buf);
+    coap_add_data(resp, out_len, out);
+    printf("[POST] %zu RPC/action invocation(s) processed -> %zu bytes\n", request_count, out_len);
 }
 
-/* ════════════════════════════════════════════════════════════
- * FETCH /c  — leer SIDs específicos (draft §3.1.3)
- * CF=141 (yang-identifiers+cbor-seq) en la petición: lista de IIDs
- * CF=142 (yang-instances+cbor-seq)  en la respuesta: mapa SID→valor
- * Soporta SID simple (uint) e instance-identifier [SID,"key"] (lista YANG).
- * ══════════════════════════════════════════════════════════*/
 
-/* Busca en un array la primera entrada que contenga key_str como string en cualquier campo */
+
+
 static int fetch_find_list_entry(CoreconfValueT *arr, const char *key_str) {
     if (!arr || arr->type != CORECONF_ARRAY) return -1;
     CoreconfArrayT *a = arr->data.array_value;
@@ -959,7 +1195,7 @@ static void handle_fetch(coap_resource_t *rsrc, coap_session_t *sess,
         return;
     }
 
-    /* Parsear cbor-seq de instance-identifiers: uint o [SID,"key"] */
+    
     typedef enum { IID_SCALAR, IID_LIST } IidKind;
     struct { IidKind kind; uint64_t sid; char key[128]; } iids[64];
     int n = 0;
@@ -997,9 +1233,9 @@ static void handle_fetch(coap_resource_t *rsrc, coap_session_t *sess,
         send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012, "no IIDs in request");
         return;
     }
-    printf("[FETCH] %d IID(s) pedidos\n", n);
+    printf("[FETCH] %d IID(s) requested\n", n);
 
-    /* Respuesta: mapa CBOR {SID: valor, ...} con CF=142 */
+    
     uint8_t buf[BUFFER_SIZE];
     zcbor_state_t enc[8];
     zcbor_new_encode_state(enc, 8, buf, BUFFER_SIZE, 1);
@@ -1009,14 +1245,14 @@ static void handle_fetch(coap_resource_t *rsrc, coap_session_t *sess,
         uint64_t sid = iids[i].sid;
 
         if (iids[i].kind == IID_SCALAR) {
-            /* 1. Búsqueda directa en la raíz */
+            
             CoreconfValueT *val = getCoreconfHashMap(g_datastore->data.map_value, sid);
             if (val) {
                 zcbor_uint64_put(enc, sid);
                 coreconfToCBOR(val, enc);
                 continue;
             }
-            /* 2. Delta lookup: buscar en contenedores con SID base ≤ target */
+            
             CoreconfHashMapT *root = g_datastore->data.map_value;
             bool found = false;
             for (size_t t = 0; t < HASHMAP_TABLE_SIZE && !found; t++) {
@@ -1036,26 +1272,26 @@ static void handle_fetch(coap_resource_t *rsrc, coap_session_t *sess,
                     obj = obj->next;
                 }
             }
-            if (!found) printf("[FETCH] SID %"PRIu64" no encontrado\n", sid);
+            if (!found) printf("[FETCH] SID %"PRIu64" not found\n", sid);
 
         } else {
-            /* IID_LIST: [SID, "key"] — buscar entrada en lista */
+            
             CoreconfValueT *list = getCoreconfHashMap(g_datastore->data.map_value, sid);
             if (list && list->type == CORECONF_ARRAY) {
                 int idx = fetch_find_list_entry(list, iids[i].key);
                 if (idx >= 0) {
                     CoreconfValueT *entry = &list->data.array_value->elements[idx];
                     zcbor_uint64_put(enc, sid);
-                    /* Devolver la entrada envuelta en array (coherente con GET) */
+                    
                     zcbor_list_start_encode(enc, 1);
                     coreconfToCBOR(entry, enc);
                     zcbor_list_end_encode(enc, 1);
                 } else {
-                    printf("[FETCH] list entry [%"PRIu64",\"%s\"] no encontrada\n",
+                    printf("[FETCH] list entry [%"PRIu64",\"%s\"] not found\n",
                            sid, iids[i].key);
                 }
             } else {
-                printf("[FETCH] lista SID %"PRIu64" no encontrada\n", sid);
+                printf("[FETCH] list SID %"PRIu64" not found\n", sid);
             }
         }
     }
@@ -1071,10 +1307,7 @@ static void handle_fetch(coap_resource_t *rsrc, coap_session_t *sess,
     printf("[FETCH] resp %zu bytes (CF=142)\n", resp_len);
 }
 
-/* ════════════════════════════════════════════════════════════
- * GET /c  — leer datastore completo (draft §3.3)
- * Sin parámetros de query. Responde CF=140 con todo el datastore.
- * ══════════════════════════════════════════════════════════*/
+
 static void handle_get(coap_resource_t *rsrc, coap_session_t *sess,
                         const coap_pdu_t *req, const coap_string_t *query,
                         coap_pdu_t *resp) {
@@ -1100,12 +1333,7 @@ static void handle_get(coap_resource_t *rsrc, coap_session_t *sess,
                                   len, buf, NULL, NULL);
 }
 
-/* ════════════════════════════════════════════════════════════
- * iPATCH /c  — actualización parcial (draft §3.2.3)
- * Sin parámetros de query. El identificador de nodo (SID) va en el PAYLOAD.
- * CF=142 (yang-instances+cbor-seq): mapa {SID: nuevo_valor}
- * Para borrar un nodo: valor = null (CBOR 0xf6)
- * ══════════════════════════════════════════════════════════*/
+
 static void handle_ipatch(coap_resource_t *rsrc, coap_session_t *sess,
                            const coap_pdu_t *req, const coap_string_t *query,
                            coap_pdu_t *resp) {
@@ -1132,21 +1360,17 @@ static void handle_ipatch(coap_resource_t *rsrc, coap_session_t *sess,
     }
 
     int n = apply_ipatch_raw(g_datastore, data, len);
-    printf("[iPATCH] %d SIDs actualizados  (%zu SIDs en datastore)\n",
+    printf("[iPATCH] %d SIDs updated  (%zu SIDs en datastore)\n",
            n, g_datastore->data.map_value->size);
     coap_pdu_set_code(resp, COAP_RESPONSE_CODE_CHANGED);
     if (n >= 0) {
-        /* Cada mapa del cbor-seq se publica como notificación individual. */
+        
         stream_push_notification_sequence(data, len, "ipatch");
         notify_stream_observers("ipatch");
     }
 }
 
-/* ════════════════════════════════════════════════════════════
- * PUT /c  — inicializar o reemplazar datastore (draft §3.3)
- * Sin parámetros de query. CF=140 (yang-data+cbor;id=sid).
- * 2.01 Created si era nuevo, 2.04 Changed si ya existía.
- * ══════════════════════════════════════════════════════════*/
+
 static void handle_put(coap_resource_t *rsrc, coap_session_t *sess,
                         const coap_pdu_t *req, const coap_string_t *query,
                         coap_pdu_t *resp) {
@@ -1173,6 +1397,30 @@ static void handle_put(coap_resource_t *rsrc, coap_session_t *sess,
         return;
     }
 
+
+    uint64_t SID_PASSWORD = 1735; // Update if your password SID is different
+
+    CoreconfValueT *password_node = getCoreconfHashMap(new_ds->data.map_value, SID_PASSWORD);
+
+    if (password_node != NULL && password_node->type == CORECONF_STRING) {
+
+        const char *new_password = password_node->data.string_value;
+
+        printf("[DTLS SECURE] Password rotation request received.\n");
+        printf("[DTLS SECURE] Applying new password in container...\n");
+
+        char command[512];
+        snprintf(command, sizeof(command), "/usr/local/bin/rotate_password.sh iotadmin '%s'", new_password);
+
+        int ret = system(command);
+        if (ret == 0) {
+            printf("[DTLS SECURE] Success: container password updated.\n");
+        } else {
+            printf("[DTLS SECURE] Error: failed to run password rotation script.\n");
+        }
+    }
+
+
     int was_existing = g_ds_exists;
     if (g_datastore) freeCoreconf(g_datastore, true);
     g_datastore = new_ds;
@@ -1182,15 +1430,11 @@ static void handle_put(coap_resource_t *rsrc, coap_session_t *sess,
            was_existing ? "2.04 Changed" : "2.01 Created");
     coap_pdu_set_code(resp, was_existing ? COAP_RESPONSE_CODE_CHANGED
                                          : COAP_RESPONSE_CODE_CREATED);
-    /* PUT publica una notificación con el estado aplicado. */
+    
     stream_push_notification_map(data, len, "put");
     notify_stream_observers("put");
 }
 
-/* ════════════════════════════════════════════════════════════
- * DELETE /c  — borrar datastore completo (draft §3.3)
- * Sin parámetros de query. Para borrar nodos concretos, usar iPATCH con null.
- * ══════════════════════════════════════════════════════════*/
 static void handle_delete(coap_resource_t *rsrc, coap_session_t *sess,
                            const coap_pdu_t *req, const coap_string_t *query,
                            coap_pdu_t *resp) {
@@ -1205,7 +1449,7 @@ static void handle_delete(coap_resource_t *rsrc, coap_session_t *sess,
     freeCoreconf(g_datastore, true);
     g_datastore = NULL;
     g_ds_exists = 0;
-    printf("[DELETE] datastore eliminado (%zu SIDs)\n", old);
+    printf("[DELETE] datastore deleted (%zu SIDs)\n", old);
     coap_pdu_set_code(resp, COAP_RESPONSE_CODE_DELETED);
     {
         const uint8_t empty_map[] = {0xa0};
@@ -1214,62 +1458,63 @@ static void handle_delete(coap_resource_t *rsrc, coap_session_t *sess,
     notify_stream_observers("delete");
 }
 
-/* ════════════════════════════════════════════════════════════
- * MAIN
- * ══════════════════════════════════════════════════════════*/
+
 static void sig_handler(int s) { (void)s; quit = 1; }
 
 int main(void) {
                 load_all_sid_files();
-            // DEMO: Publicar dos eventos de ejemplo al arrancar (como en el draft)
             publish_example_port_fault("0/4/21", "Open pin 2");
             publish_example_port_fault("1/4/21", "Open pin 5");
         if (load_notification_sid(&g_notification_sid) == 0) {
-            printf("[SID] Usando notification_sid=%" PRIu64 " para notificaciones del draft\n", g_notification_sid);
+            printf("[SID] Using notification_sid=%" PRIu64 " for draft notifications\n", g_notification_sid);
         } else {
             g_notification_sid = 0;
         }
-        (void)g_notification_sid; /* notification SID loaded (if any) */
+        (void)g_notification_sid; 
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
 
     if (load_runtime_system_sids(&g_sys_sids) != 0) {
-        fprintf(stderr, "[SID] FATAL: no se pudo cargar sid/ietf-system.sid\n");
+        fprintf(stderr, "[SID] FATAL: could not load sid/ietf-system.sid\n");
         return 1;
     }
     if (load_runtime_interfaces_sids(&g_if_sids) != 0) {
-        fprintf(stderr, "[SID] FATAL: no se pudo cargar sid/ietf-interfaces.sid\n");
+        fprintf(stderr, "[SID] FATAL: could not load sid/ietf-interfaces.sid\n");
         return 1;
     }
-    g_sid_fingerprint = compute_sid_fingerprint(&g_sys_sids, &g_if_sids);
+    if (load_runtime_operation_sids(&g_ops_sids) != 0) {
+        fprintf(stderr, "[SID] FATAL: could not load sid/ietf-coreconf-actions.sid\n");
+        return 1;
+    }
+    g_sid_fingerprint = compute_sid_fingerprint(&g_sys_sids, &g_if_sids, &g_ops_sids);
     printf("[SID] fingerprint=%" PRIu64 "\n", g_sid_fingerprint);
 
     printf("╔══════════════════════════════════════════════════════════════╗\n");
     printf("║   CORECONF SERVER — draft-ietf-core-comi-20 (libcoap)      ║\n");
     printf("╠══════════════════════════════════════════════════════════════╣\n");
-    printf("║  PUT    /c  CF=140   → inicializar/reemplazar datastore     ║\n");
-    printf("║  FETCH  /c  CF=141   → leer SIDs (lista en payload)        ║\n");
-    printf("║  GET    /c           → datastore completo                  ║\n");
-    printf("║  iPATCH /c  CF=142   → actualizar nodos (SID en payload)   ║\n");
-    printf("║  DELETE /c           → borrar datastore completo           ║\n");
-    printf("║  POST   /c           → RPC/acciones únicamente             ║\n");
+    printf("║  PUT    /c  CF=140   -> initialize/replace datastore     ║\n");
+    printf("║  FETCH  /c  CF=141   -> read SIDs (list in payload)        ║\n");
+    printf("║  GET    /c           -> full datastore                  ║\n");
+    printf("║  iPATCH /c  CF=142   -> update nodes (SID in payload)   ║\n");
+    printf("║  DELETE /c           -> delete full datastore           ║\n");
+    printf("║  POST   /c           -> RPC/actions only             ║\n");
     printf("╠══════════════════════════════════════════════════════════════╣\n");
-    printf("║  Datastore único — temperatura, humedad, etc.              ║\n");
+    printf("║  Unified datastore - temperature, humidity, etc.              ║\n");
     printf("╚══════════════════════════════════════════════════════════════╝\n\n");
-    printf("Escuchando en coap://0.0.0.0:5683/c\n");
+    printf("Listening on coap://0.0.0.0:5683/c\n");
     printf("              coap://0.0.0.0:5683/s  (Observe stream)\n");
     printf("              coaps://0.0.0.0:5684/c  (DTLS)\n");
     printf("              coaps://0.0.0.0:5684/s  (DTLS Observe stream)\n\n");
-        printf("Stream notification SID: derivado del primer SID del cambio (fallback módulo %" PRIu64 ")\n\n",
+        printf("Stream notification SID: derived from first changed SID (module fallback %" PRIu64 ")\n\n",
             g_sys_sids.module);
 
     coap_startup();
     coap_set_log_level(COAP_LOG_WARN);
 
     coap_context_t *ctx = coap_new_context(NULL);
-    if (!ctx) { fprintf(stderr, "Error creando contexto\n"); return 1; }
+    if (!ctx) { fprintf(stderr, "Error creating context\n"); return 1; }
     coap_context_set_block_mode(ctx, COAP_BLOCK_USE_LIBCOAP);
 
-    /* ── Endpoint UDP 5683 (CoAP sin cifrar) ── */
+    
     coap_address_t addr;
     coap_address_init(&addr);
     addr.addr.sin.sin_family      = AF_INET;
@@ -1277,12 +1522,10 @@ int main(void) {
     addr.addr.sin.sin_port        = htons(5683);
     addr.size                     = sizeof(struct sockaddr_in);
     if (!coap_new_endpoint(ctx, &addr, COAP_PROTO_UDP)) {
-        fprintf(stderr, "Error creando endpoint UDP 5683\n"); return 1;
+        fprintf(stderr, "Error creating UDP endpoint 5683\n"); return 1;
     }
 
-    /* ── Endpoint DTLS 5684 (CoAPS) ──
-     * Por defecto usa certificados X.509 (PKI).
-     * CORECONF_TLS_MODE=psk permite fallback a PSK. */
+    
     const char *tls_mode = getenv("CORECONF_TLS_MODE");
     if (!tls_mode || tls_mode[0] == '\0') tls_mode = "cert";
     if (coap_dtls_is_supported()) {
@@ -1297,10 +1540,10 @@ int main(void) {
             spsk.psk_info.key.s         = (const uint8_t *)psk_key;
             spsk.psk_info.key.length    = strlen(psk_key);
             if (!coap_context_set_psk2(ctx, &spsk)) {
-                fprintf(stderr, "[DTLS] error configurando PSK\n");
+                fprintf(stderr, "[DTLS] error configuring PSK\n");
                 return 1;
             }
-            printf("[DTLS] modo PSK  id=\"%s\"\n", psk_id);
+            printf("[DTLS] mode PSK  id=\"%s\"\n", psk_id);
         } else {
 
             const char *profile = getenv("CORECONF_CERT_PROFILE");
@@ -1333,11 +1576,11 @@ int main(void) {
             pki.pki_key.key.pem.private_key = key_file;
 
             if (!coap_context_set_pki(ctx, &pki)) {
-                fprintf(stderr, "[DTLS] error configurando certificados (ca=%s cert=%s key=%s)\n",
+                fprintf(stderr, "[DTLS] error configuring certificates (ca=%s cert=%s key=%s)\n",
                         ca_file, cert_file, key_file);
                 return 1;
             }
-            printf("[DTLS] modo CERT  ca=%s cert=%s key=%s\n", ca_file, cert_file, key_file);
+            printf("[DTLS] mode CERT  ca=%s cert=%s key=%s\n", ca_file, cert_file, key_file);
         }
 
         coap_address_t dtls_addr;
@@ -1347,11 +1590,11 @@ int main(void) {
         dtls_addr.addr.sin.sin_port        = htons(5684);
         dtls_addr.size                     = sizeof(struct sockaddr_in);
         if (coap_new_endpoint(ctx, &dtls_addr, COAP_PROTO_DTLS))
-            printf("[DTLS] coaps://0.0.0.0:5684/c activo\n");
+            printf("[DTLS] coaps://0.0.0.0:5684/c active\n");
         else
-            fprintf(stderr, "[DTLS] advertencia: no se pudo abrir endpoint 5684\n");
+            fprintf(stderr, "[DTLS] warning: could not open endpoint 5684\n");
     } else {
-        printf("[DTLS] no disponible en este build (recompila libcoap con DTLS)\n");
+        printf("[DTLS] not available in this build (rebuild libcoap with DTLS)\n");
     }
 
     coap_resource_t *res = coap_resource_init(coap_make_str_const("c"),
@@ -1387,7 +1630,7 @@ int main(void) {
 
     while (!quit) coap_io_process(ctx, 1000);
 
-    printf("\nApagando servidor...\n");
+    printf("\nShutting down server...\n");
     stream_clear_events();
     if (g_datastore) freeCoreconf(g_datastore, true);
     coap_free_context(ctx);

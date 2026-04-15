@@ -1,24 +1,24 @@
 version: '3.8'
 
-# Arquitectura CORECONF (draft-ietf-core-comi-20)
+# CORECONF architecture (draft-ietf-core-comi-20)
 # ─────────────────────────────────────────────────────────────
-# Un servidor CORECONF = UN único datastore en /c  (draft §2.4)
-# El datastore puede tener nodos de temperatura, humedad, etc.
-# No hay routing ?id=: el cliente accede directamente al /c del servidor.
+# One CORECONF server = one unified datastore at /c (draft §2.4)
+# The datastore can contain temperature, humidity, and other nodes.
+# There is no ?id= routing: the client accesses /c directly.
 #
-# Usar:
+# Usage:
 #   docker compose up -d --build
 #   docker attach coreconf_client
-#   > store temperature 22.5    ← PUT /c — inicializa el datastore
-#   > ipatch 30 humidity        ← iPATCH /c — añade nodo humedad
-#   > ipatch 31 60.5            ← iPATCH /c — añade valor humedad
-#   > get                       ← GET /c   — ve temperature Y humidity
-#   > fetch 20 31               ← FETCH /c — solo esos dos SIDs
+#   > store temperature 22.5    ← PUT /c — initialize datastore
+#   > ipatch 30 humidity        ← iPATCH /c — add humidity node
+#   > ipatch 31 60.5            ← iPATCH /c — set humidity value
+#   > get                       ← GET /c   — see temperature and humidity
+#   > fetch 20 31               ← FETCH /c — only those two SIDs
 # ─────────────────────────────────────────────────────────────
 
 services:
 
-  # ── Servidor CORECONF — datastore único en /c ────────────────────────────
+  # ── CORECONF server — unified datastore at /c ─────────────────────────────
   coreconf_server:
     image: iot-coreconf
     container_name: coreconf_server
@@ -36,9 +36,9 @@ services:
       - ./logs:/iot_device/logs
     restart: unless-stopped
 
-  # ── Cliente CORECONF — REPL interactivo ─────────────────────────────────
-  # Conectar: docker attach coreconf_client
-  # Salir sin matar el contenedor: Ctrl-P Ctrl-Q
+  # ── CORECONF client — interactive REPL ───────────────────────────────────
+  # Connect: docker attach coreconf_client
+  # Detach without stopping container: Ctrl-P Ctrl-Q
   coreconf_client:
     image: iot-coreconf
     container_name: coreconf_client

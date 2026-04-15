@@ -42,11 +42,11 @@ EXAMPLES_DIR = examples
 
 # Build rule for examples
 examples: $(LIB_NAME).a
-	@echo "Compilando ejemplos..."
+	@echo "Building examples..."
 	$(CC) $(CFLAGS) $(INCLUDE_DIRS) $(EXAMPLES_DIR)/test_zcbor_migration.c $(LIB_NAME).a -o $(EXAMPLES_DIR)/test_migration
 	$(CC) $(CFLAGS) $(INCLUDE_DIRS) $(EXAMPLES_DIR)/test_fetch_simple.c $(LIB_NAME).a -o $(EXAMPLES_DIR)/test_fetch_simple
 	$(CC) $(CFLAGS) $(INCLUDE_DIRS) $(EXAMPLES_DIR)/test_exhaustive.c $(LIB_NAME).a -o $(EXAMPLES_DIR)/test_exhaustive
-	@echo "✓ Ejemplos compilados en $(EXAMPLES_DIR)/"
+	@echo "✓ Examples built in $(EXAMPLES_DIR)/"
 
 # Legacy example target (kept for compatibility)
 EXEC_NAME = example

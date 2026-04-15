@@ -1,3 +1,4 @@
+/* CORECONF value types, constructors, and hashmap/array primitives. */
 #include "../include/coreconfTypes.h"
 
 #include <inttypes.h>
@@ -102,7 +103,6 @@ CoreconfValueT* createCoreconfHashmap(void) {
     return val;
 }
 
-// Create CoreconfValueT* from an existing CoreconfHashMapT
 CoreconfValueT* wrapCoreconfHashmap(CoreconfHashMapT* map) {
     CoreconfValueT* val = malloc(sizeof(CoreconfValueT));
     val->type = CORECONF_HASHMAP;
@@ -110,13 +110,11 @@ CoreconfValueT* wrapCoreconfHashmap(CoreconfHashMapT* map) {
     return val;
 }
 
-// Insert Coreconf Object into CoreconfHashMap
 int insertCoreconfHashMap(CoreconfHashMapT* map, uint64_t key, CoreconfValueT* value) {
     int loopCount = 0;
     size_t index = hashKey((uint32_t)key);
 
     CoreconfObjectT* coreconfObject_ = createCoreconfObject();
-    // Check if malloc failed
     if (coreconfObject_ == NULL) {
         return -1;
     }
@@ -124,10 +122,8 @@ int insertCoreconfHashMap(CoreconfHashMapT* map, uint64_t key, CoreconfValueT* v
     coreconfObject_->value = value;
 
     if (map->table[index] != NULL) {
-        // Delete the object if it already exists and overwrite it
         CoreconfObjectT* current = map->table[index];
 
-        // Overwrite if the key already exists
         while (current != NULL) {
             if (loopCount > CORECONF_MAX_LOOP) {
                 printf("Loop count exceeded CORECONF_MAX_LOOP\n");
@@ -151,7 +147,6 @@ int insertCoreconfHashMap(CoreconfHashMapT* map, uint64_t key, CoreconfValueT* v
     return 0;
 }
 
-// Delete a SID from CoreconfHashMap. Returns 0 on success, -1 if not found.
 int deleteFromCoreconfHashMap(CoreconfHashMapT* map, uint64_t key) {
     size_t index = hashKey((uint32_t)key);
     CoreconfObjectT *prev = NULL;
@@ -168,10 +163,9 @@ int deleteFromCoreconfHashMap(CoreconfHashMapT* map, uint64_t key) {
         prev = cur;
         cur  = cur->next;
     }
-    return -1; /* not found */
+    return -1; 
 }
 
-// Get Value from CoreconfHashMap
 CoreconfValueT* getCoreconfHashMap(CoreconfHashMapT* map, uint64_t key) {
     size_t index = hashKey((uint32_t)key);
     CoreconfObjectT* current = map->table[index];
@@ -185,20 +179,18 @@ CoreconfValueT* getCoreconfHashMap(CoreconfHashMapT* map, uint64_t key) {
 }
 
 void freeCoreconfHashMap(CoreconfHashMapT* map) {
+    if (!map) return;
     for (size_t i = 0; i < HASHMAP_TABLE_SIZE; i++) {
         CoreconfObjectT* current = map->table[i];
-        while (current != NULL) {
-            if (current->next != NULL) {
-                CoreconfObjectT* next = current->next;
-                // Free the value only if its not null
-                if (current->value != NULL) freeCoreconf(current->value, false);
-                free(current);
-                current = next;
-            } else {
-                free(current);
-                current = NULL;
+        while (current) {
+            CoreconfObjectT* next = current->next;
+            if (current->value) {
+                freeCoreconf(current->value, true);
             }
+            free(current);
+            current = next;
         }
+        map->table[i] = NULL;
     }
     free(map);
 }
@@ -220,10 +212,8 @@ void printCoreconfObject(CoreconfObjectT* obj) {
     printf("Key: %d Value: ", (int)obj->key);
     printCoreconf(obj->value);
     printf(", ");
-    // printf("\n");
 }
 
-// Method used in examineCoreconf to match the sidKey value
 uint64_t getCoreconfValueAsUint64(CoreconfValueT* val) {
     if (val->type == CORECONF_INT_64)
         return val->data.i64;
@@ -323,14 +313,11 @@ void freeCoreconf(CoreconfValueT* val, bool freeValue) {
         freeCoreconfHashMap(val->data.map_value);
     }
 
-    // freeValue is true when the value is not part of an array
     if (freeValue) free(val);
 
-    // Set val as NULL
     val = NULL;
 }
 
-// Iterate over CoreconfHashMap and apply a function to each CoreconfObject value
 void iterateCoreconfHashMap(CoreconfHashMapT* map, void* udata, void (*f)(CoreconfObjectT* object, void* udata)) {
     for (size_t i = 0; i < HASHMAP_TABLE_SIZE; i++) {
         CoreconfObjectT* current = map->table[i];
@@ -341,10 +328,7 @@ void iterateCoreconfHashMap(CoreconfHashMapT* map, void* udata, void (*f)(Coreco
     }
 }
 
-// Knuth's multiplicative hash for generating hash values for CoreconfHashMap Keys
-// TODO Supports only 32-bit hash values, support for SID 64-bit hash values and negative keys
 size_t hashKey(uint32_t key) {
-    // return (size_t) key % HASHMAP_TABLE_SIZE;
     return (size_t)((key * 2654435769) >> 32) % HASHMAP_TABLE_SIZE;
 }
 
