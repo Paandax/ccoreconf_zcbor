@@ -980,9 +980,47 @@ static void handle_post(coap_resource_t *rsrc, coap_session_t *sess,
     (void)rsrc; (void)sess; (void)query;
 
     uint16_t cf = get_content_format(req);
+    if (cf == CF_YANG_DATA_CBOR) {
+        size_t len = 0;
+        const uint8_t *data = NULL;
+
+        if (!coap_get_data(req, &len, &data) || len == 0) {
+            send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012, "missing payload");
+            return;
+        }
+
+        if (g_datastore && g_ds_exists) {
+            send_error(resp, COAP_RESPONSE_CODE_CONFLICT, 1012,
+                       "datastore already exists - use PUT /c to replace");
+            return;
+        }
+
+        print_cbor_hex("[POST create] payload", data, len);
+
+        CoreconfValueT *new_ds = parse_put_request(data, len);
+        if (!new_ds || new_ds->type != CORECONF_HASHMAP) {
+            send_error(resp, COAP_RESPONSE_CODE_BAD_REQUEST, 1012,
+                       "POST requires CBOR datastore map");
+            if (new_ds) freeCoreconf(new_ds, true);
+            return;
+        }
+
+        if (g_datastore) {
+            freeCoreconf(g_datastore, true);
+        }
+        g_datastore = new_ds;
+        g_ds_exists = 1;
+
+        printf("[POST create] %zu SIDs (2.01 Created)\n", g_datastore->data.map_value->size);
+        coap_pdu_set_code(resp, COAP_RESPONSE_CODE_CREATED);
+        stream_push_notification_map(data, len, "post-create");
+        notify_stream_observers("post-create");
+        return;
+    }
+
     if (cf != CF_YANG_INSTANCES) {
         send_error(resp, COAP_RESPONSE_CODE_UNSUPPORTED_CONTENT_FORMAT,
-                   1012, "POST requires CF=142 (yang-instances+cbor-seq)");
+                   1012, "POST requires CF=140 (yang-data+cbor) or CF=142 (yang-instances+cbor-seq)");
         return;
     }
 
@@ -1421,15 +1459,12 @@ static void handle_put(coap_resource_t *rsrc, coap_session_t *sess,
     }
 
 
-    int was_existing = g_ds_exists;
     if (g_datastore) freeCoreconf(g_datastore, true);
     g_datastore = new_ds;
     g_ds_exists = 1;
 
-    printf("[PUT] %zu SIDs  (%s)\n", g_datastore->data.map_value->size,
-           was_existing ? "2.04 Changed" : "2.01 Created");
-    coap_pdu_set_code(resp, was_existing ? COAP_RESPONSE_CODE_CHANGED
-                                         : COAP_RESPONSE_CODE_CREATED);
+    printf("[PUT] %zu SIDs (2.04 Changed)\n", g_datastore->data.map_value->size);
+    coap_pdu_set_code(resp, COAP_RESPONSE_CODE_CHANGED);
     
     stream_push_notification_map(data, len, "put");
     notify_stream_observers("put");
@@ -1496,7 +1531,7 @@ int main(void) {
     printf("║  GET    /c           -> full datastore                  ║\n");
     printf("║  iPATCH /c  CF=142   -> update nodes (SID in payload)   ║\n");
     printf("║  DELETE /c           -> delete full datastore           ║\n");
-    printf("║  POST   /c           -> RPC/actions only             ║\n");
+    printf("║  POST   /c  CF=140/142 -> create datastore or RPC/actions ║\n");
     printf("╠══════════════════════════════════════════════════════════════╣\n");
     printf("║  Unified datastore - temperature, humidity, etc.              ║\n");
     printf("╚══════════════════════════════════════════════════════════════╝\n\n");

@@ -38,10 +38,10 @@ RUN make clean && make
 # Adjust include paths and libcoap log constants
 # Replace DEBUG with WARN for Ubuntu compiler compatibility
 RUN cd iot_apps && \
-    sed -i 's|"../../include/|"|g' *.c && \
-    sed -i 's|"../../coreconf_zcbor_generated/|"|g' *.c && \
-    sed -i 's/COAP_LOG_DEBUG/COAP_LOG_WARN/g' *.c && \
-    sed -i 's/COAP_LOG_INFO/COAP_LOG_WARN/g' *.c
+    sed -i 's|"../../include/|"|g' coreconf_server.c coreconf_cli.c && \
+    sed -i 's|"../../coreconf_zcbor_generated/|"|g' coreconf_server.c coreconf_cli.c && \
+    sed -i 's/COAP_LOG_DEBUG/COAP_LOG_WARN/g' coreconf_server.c coreconf_cli.c && \
+    sed -i 's/COAP_LOG_INFO/COAP_LOG_WARN/g' coreconf_server.c coreconf_cli.c
 
 # Build CORECONF applications (draft-ietf-core-comi-20)
 RUN COAP_PKG=$(pkg-config --exists libcoap-3-openssl && echo libcoap-3-openssl || \
